@@ -1,0 +1,101 @@
+{
+  "5408585719": {
+    "username": "aplnx",
+    "first_seen": "2026-02-22 16:40:44",
+    "referrals": {
+      "count": 1,
+      "referred_users": [
+        "8254486789"
+      ]
+    },
+    "invited_by": null,
+    "active_requests": {
+      "stars": "stars_5408585719_1771764165",
+      "premium": null
+    },
+    "requests_history": [
+      {
+        "id": "stars_5408585719_1771764165",
+        "type": "stars",
+        "user_id": 5408585719,
+        "status": "pending",
+        "created_at": "2026-02-22 16:42:45",
+        "data": {
+          "amount": 666,
+          "username": "@dskadksadjl",
+          "datetime": "23.02.2026 12:00",
+          "user_username": "aplnx"
+        }
+      }
+    ]
+  },
+  "7658420976": {
+    "username": "Didinsadik73",
+    "first_seen": "2026-02-22 16:43:49",
+    "referrals": {
+      "count": 0,
+      "referred_users": []
+    },
+    "invited_by": null,
+    "active_requests": {
+      "stars": "stars_7658420976_1771764333",
+      "premium": "premium_7658420976_1771764360"
+    },
+    "requests_history": [
+      {
+        "id": "stars_7658420976_1771764333",
+        "type": "stars",
+        "user_id": 7658420976,
+        "status": "pending",
+        "created_at": "2026-02-22 16:45:33",
+        "data": {
+          "amount": 999,
+          "username": "@Didinsadik73",
+          "datetime": "23.02.2026 18:00",
+          "user_username": "Didinsadik73"
+        }
+      },
+      {
+        "id": "premium_7658420976_1771764360",
+        "type": "premium",
+        "user_id": 7658420976,
+        "status": "pending",
+        "created_at": "2026-02-22 16:46:00",
+        "data": {
+          "duration": 1,
+          "duration_name": "1 месяц",
+          "datetime": "23.02.2026 18:00",
+          "user_username": "Didinsadik73"
+        }
+      }
+    ]
+  },
+  "8254486789": {
+    "username": "Ana_13_2",
+    "first_seen": "2026-02-22 16:49:14",
+    "referrals": {
+      "count": 0,
+      "referred_users": []
+    },
+    "invited_by": "5408585719",
+    "active_requests": {
+      "stars": "stars_8254486789_1771764661",
+      "premium": null
+    },
+    "requests_history": [
+      {
+        "id": "stars_8254486789_1771764661",
+        "type": "stars",
+        "user_id": 8254486789,
+        "status": "pending",
+        "created_at": "2026-02-22 16:51:01",
+        "data": {
+          "amount": 663,
+          "username": "@jsjd",
+          "datetime": "23.02.2026 18:00",
+          "user_username": "Ana_13_2"
+        }
+      }
+    ]
+  }
+}
