@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 user_states = {}
 
 # Словарь для хранения задач автопринятия
-# {request_id: (chat_id, message_id, task)}
+# {request_id: job}
 auto_accept_tasks = {}
 
 # ================== ПРОВЕРКА ПОДПИСКИ ==================
@@ -106,14 +106,17 @@ async def check_active_request_and_notify(user_id, update: Update) -> bool:
     
     return False
 
-async def accept_request(request_id: str, context: ContextTypes.DEFAULT_TYPE, admin_message = None):
+async def accept_request(request_id: str, context: ContextTypes.DEFAULT_TYPE, admin_message=None, is_auto=False):
     """
     Функция принятия заявки (вызывается как по кнопке, так и по таймеру)
     """
+    logger.info(f"Принимаем заявку {request_id}, авто={is_auto}")
+    
     # Ищем заявку
     user_id, request_data = get_request_by_id(request_id)
     
     if not user_id:
+        logger.error(f"Заявка {request_id} не найдена!")
         if admin_message:
             await admin_message.edit_text("❌ Заявка не найдена!")
         return
@@ -140,13 +143,24 @@ async def accept_request(request_id: str, context: ContextTypes.DEFAULT_TYPE, ad
         
         # Обновляем сообщение админа
         if admin_message:
+            status_text = "⚡️ Автоматически" if is_auto else "👨‍💻 Вручную"
             await admin_message.edit_text(
                 f"✅ Заявка {request_id} принята!\n"
                 f"Тип: {request_data['type']}\n"
-                f"Статус: {'⚡️ Автоматически' if admin_message is None else '👨‍💻 Вручную'}"
+                f"Статус: {status_text}"
+            )
+        else:
+            # Если админского сообщения нет, шлем новое
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"✅ Заявка {request_id} автоматически принята через 60 секунд!\n"
+                f"Тип: {request_data['type']}"
             )
         
+        logger.info(f"Заявка {request_id} успешно принята")
+        
     except Exception as e:
+        logger.error(f"Ошибка при отправке условий для {request_id}: {e}")
         if admin_message:
             await admin_message.edit_text(
                 f"❌ Ошибка при отправке условий!\n"
@@ -164,26 +178,18 @@ async def auto_accept_job(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     request_id = job.data
     
+    logger.info(f"Сработал таймер автопринятия для заявки {request_id}")
+    
     # Проверяем, не была ли уже заявка принята
     if request_id not in auto_accept_tasks:
+        logger.info(f"Заявка {request_id} уже обработана, пропускаем")
         return
     
-    chat_id, message_id, _ = auto_accept_tasks[request_id]
+    # Удаляем из словаря
+    del auto_accept_tasks[request_id]
     
-    try:
-        # Получаем сообщение админа
-        admin_message = await context.bot.get_chat(chat_id)
-        message = await context.bot.get_message(chat_id, message_id)
-        
-        # Принимаем заявку
-        await accept_request(request_id, context, message)
-        
-    except Exception as e:
-        logger.error(f"Ошибка автопринятия {request_id}: {e}")
-    finally:
-        # Удаляем задачу из словаря
-        if request_id in auto_accept_tasks:
-            del auto_accept_tasks[request_id]
+    # Принимаем заявку
+    await accept_request(request_id, context, is_auto=True)
 
 # ================== КОМАНДЫ ==================
 
@@ -276,9 +282,10 @@ async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Отменяем задачу автопринятия, если есть
     if request_id in auto_accept_tasks:
-        chat_id, message_id, task = auto_accept_tasks[request_id]
-        task.schedule_removal()
+        job = auto_accept_tasks[request_id]
+        job.schedule_removal()
         del auto_accept_tasks[request_id]
+        logger.info(f"Отменена задача автопринятия для {request_id}")
     
     target_user_id, request_data = get_request_by_id(request_id)
     
@@ -462,7 +469,8 @@ ID заявки: {request_id}
     )
     
     # Сохраняем информацию о задаче
-    auto_accept_tasks[request_id] = (ADMIN_ID, admin_message.message_id, job)
+    auto_accept_tasks[request_id] = job
+    logger.info(f"Создана задача автопринятия для {request_id}")
 
 # ================== PREMIUM: ШАГИ ==================
 
@@ -584,7 +592,8 @@ ID заявки: {request_id}
     )
     
     # Сохраняем информацию о задаче
-    auto_accept_tasks[request_id] = (ADMIN_ID, admin_message.message_id, job)
+    auto_accept_tasks[request_id] = job
+    logger.info(f"Создана задача автопринятия для {request_id}")
 
 # ================== ОБРАБОТКА КНОПКИ "ПРИНЯТЬ" ==================
 
@@ -602,15 +611,17 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # Получаем ID заявки
     request_id = query.data.replace('accept_', '')
+    logger.info(f"Ручное принятие заявки {request_id}")
     
     # Отменяем задачу автопринятия, если есть
     if request_id in auto_accept_tasks:
-        chat_id, message_id, task = auto_accept_tasks[request_id]
-        task.schedule_removal()
+        job = auto_accept_tasks[request_id]
+        job.schedule_removal()
         del auto_accept_tasks[request_id]
+        logger.info(f"Отменена задача автопринятия для {request_id}")
     
     # Принимаем заявку вручную
-    await accept_request(request_id, context, query.message)
+    await accept_request(request_id, context, query.message, is_auto=False)
 
 # ================== ЗАПУСК БОТА ==================
 
@@ -619,7 +630,7 @@ def main():
     # Инициализируем БД
     init_db()
     
-    # Создаем приложение
+    # Создаем приложение с поддержкой job_queue
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрируем обработчики команд
@@ -639,6 +650,8 @@ def main():
     print(f"Обязательная подписка на {REQUIRED_CHANNEL}")
     print("Условия: 2 реферала, убрали канал из условий")
     print("⏱ Автопринятие заявок через 60 секунд!")
+    
+    # Запускаем polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
