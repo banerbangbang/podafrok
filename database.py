@@ -80,6 +80,20 @@ def update_user(user_id, updates):
     save_db(data)
     return data[user_id_str]
 
+def has_active_request(user_id):
+    """
+    Проверяет, есть ли у пользователя активная заявка (любого типа)
+    Возвращает (True, тип) или (False, None)
+    """
+    user = get_user(user_id)
+    
+    if user["active_requests"]["stars"]:
+        return True, "stars"
+    elif user["active_requests"]["premium"]:
+        return True, "premium"
+    else:
+        return False, None
+
 def add_referral(inviter_username, new_user_id):
     """
     Добавляет реферала пригласившему
@@ -121,8 +135,9 @@ def add_active_request(user_id, request_type, request_data):
     """
     user = get_user(user_id)
     
-    # Проверяем, нет ли уже активной заявки этого типа
-    if user["active_requests"][request_type] is not None:
+    # Проверяем, нет ли уже активной заявки (ЛЮБОГО типа)
+    has_active, _ = has_active_request(user_id)
+    if has_active:
         return False
     
     # Генерируем ID заявки
