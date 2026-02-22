@@ -1,7 +1,7 @@
 """
 Главный файл бота
 Запуск и обработка всех сообщений
-Теперь: только ОДНА активная заявка на пользователя!
+Теперь: обязательная подписка на канал!
 """
 
 import logging
@@ -16,13 +16,15 @@ from telegram.ext import (
 )
 
 # Наши модули
-from config import BOT_TOKEN, ADMIN_ID, MAX_STARS, ABOUT_TEXT, START_TEXT
-from config import STARS_CONDITIONS, PREMIUM_CONDITIONS, PREMIUM_OPTIONS
+from config import (
+    BOT_TOKEN, ADMIN_ID, MAX_STARS, ABOUT_TEXT, START_TEXT,
+    STARS_CONDITIONS, PREMIUM_CONDITIONS, PREMIUM_OPTIONS,
+    REQUIRED_CHANNEL, REQUIRED_CHANNEL_ID, SUBSCRIPTION_REQUIRED_TEXT
+)
 from keyboards import (
     get_main_keyboard,
     get_premium_duration_keyboard,
-    get_accept_request_keyboard,
-    get_admin_commands
+    get_accept_request_keyboard
 )
 from database import (
     init_db,
@@ -40,16 +42,56 @@ from utils import (
     extract_username_from_link
 )
 
-# Включаем логирование (поможет видеть ошибки)
+# Включаем логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Состояния пользователей (для многошаговых форм)
-# Храним в памяти, т.к. после перезапуска бота формы всё равно сбросятся
+# Состояния пользователей
 user_states = {}
+
+# ================== ПРОВЕРКА ПОДПИСКИ ==================
+
+async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Проверяет, подписан ли пользователь на обязательный канал
+    """
+    try:
+        # Получаем статус участника канала
+        member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
+        
+        # Статусы, которые считаются подпиской
+        if member.status in ['member', 'administrator', 'creator']:
+            return True
+        else:
+            return False
+    except Exception as e:
+        # Если канал недоступен или бот не админ, логируем ошибку
+        logger.error(f"Ошибка проверки подписки для {user_id}: {e}")
+        # В случае ошибки лучше пропустить (чтобы бот работал)
+        return True
+
+async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Декоратор для проверки подписки перед каждым действием
+    Возвращает True если есть подписка, False если нет
+    """
+    user_id = update.effective_user.id
+    
+    # Проверяем подписку
+    is_subscribed = await check_subscription(user_id, context)
+    
+    if not is_subscribed:
+        # Отправляем сообщение о необходимости подписки
+        await update.message.reply_text(
+            SUBSCRIPTION_REQUIRED_TEXT.format(channel=REQUIRED_CHANNEL),
+            parse_mode='HTML'
+        )
+        return False
+    
+    return True
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 
@@ -83,11 +125,19 @@ async def check_active_request_and_notify(user_id, update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обработчик команды /start
-    Проверяет реферальный параметр и показывает главное меню
+    Проверяет подписку, реферальный параметр и показывает главное меню
     """
     user = update.effective_user
     user_id = user.id
     username = user.username or f"user_{user_id}"
+    
+    # Проверяем подписку
+    if not await check_subscription(user_id, context):
+        await update.message.reply_text(
+            SUBSCRIPTION_REQUIRED_TEXT.format(channel=REQUIRED_CHANNEL),
+            parse_mode='HTML'
+        )
+        return
     
     # Получаем или создаем пользователя в БД
     db_user = get_user(user_id)
@@ -120,6 +170,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Команда /status - показывает прогресс рефералов и статус заявки
     """
     user_id = update.effective_user.id
+    
+    # Проверяем подписку
+    if not await subscription_required(update, context):
+        return
+    
     db_user = get_user(user_id)
     
     referrals_count = db_user["referrals"]["count"]
@@ -135,7 +190,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_text = f"""
 📊 <b>Ваш статус</b>
 
-👥 Приглашено друзей: {referrals_count}
+👥 Приглашено друзей: {referrals_count} из 2
 
 <b>Активная заявка:</b>
 {active_text}
@@ -201,6 +256,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Обрабатывает все текстовые сообщения
     """
     user_id = update.effective_user.id
+    
+    # Проверяем подписку (кроме команды /start)
+    if not await subscription_required(update, context):
+        return
+    
     text = update.message.text
     
     # Главное меню
@@ -324,9 +384,6 @@ async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(result)
         return
     
-    # Дата корректна
-    datetime_obj = result
-    
     # Получаем сохраненные данные
     amount = context.user_data.get('stars_amount')
     stars_username = context.user_data.get('stars_username')
@@ -397,7 +454,7 @@ async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT
     
     user_id = query.from_user.id
     
-    # Еще раз проверяем активную заявку (на случай если создал пока выбирал)
+    # Еще раз проверяем активную заявку
     has_active, _ = has_active_request(user_id)
     if has_active:
         await query.edit_message_text(
@@ -406,8 +463,7 @@ async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT
         )
         return
     
-    # Получаем выбранный срок из callback_data
-    # callback_data имеет формат "premium_X", где X - количество месяцев
+    # Получаем выбранный срок
     months = int(query.data.split('_')[1])
     
     # Находим название срока
@@ -514,8 +570,7 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("⛔️ Эта кнопка только для администратора!")
         return
     
-    # Получаем ID заявки из callback_data
-    # callback_data имеет формат "accept_ID"
+    # Получаем ID заявки
     request_id = query.data.replace('accept_', '')
     
     # Ищем заявку
@@ -525,12 +580,19 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("❌ Заявка не найдена!")
         return
     
-    # Отправляем пользователю условия в зависимости от типа заявки
+    # Получаем данные пользователя для реферальной ссылки
+    db_user = get_user(user_id)
+    bot_username = context.bot.username
+    
+    # Формируем реферальную ссылку
+    referral_link = format_referral_link(bot_username, db_user["username"])
+    
+    # Отправляем пользователю условия
     try:
         if request_data["type"] == "stars":
-            conditions = STARS_CONDITIONS
+            conditions = STARS_CONDITIONS.format(referral_link=referral_link)
         else:
-            conditions = PREMIUM_CONDITIONS
+            conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
         
         await context.bot.send_message(
             user_id,
@@ -538,14 +600,13 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode='HTML'
         )
         
-        # Уведомляем админа об успехе
+        # Уведомляем админа
         await query.edit_message_text(
             f"✅ Условия отправлены пользователю!\n"
             f"Заявка: {request_id}"
         )
         
     except Exception as e:
-        # Ошибка отправки (пользователь заблокировал бота и т.д.)
         await query.edit_message_text(
             f"❌ Не удалось отправить условия пользователю!\n"
             f"Ошибка: {e}\n\n"
@@ -578,7 +639,8 @@ def main():
     
     # Запускаем бота
     print("Бот запущен! Нажмите Ctrl+C для остановки.")
-    print("Теперь можно создать только ОДНУ активную заявку!")
+    print(f"Обязательная подписка на {REQUIRED_CHANNEL}")
+    print("Условия: 2 реферала, убрали канал из условий")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
