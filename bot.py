@@ -1,6 +1,7 @@
 """
 Главный файл бота
 Запуск и обработка всех сообщений
+Теперь: только ОДНА активная заявка на пользователя!
 """
 
 import logging
@@ -30,7 +31,8 @@ from database import (
     add_referral,
     add_active_request,
     remove_active_request,
-    get_request_by_id
+    get_request_by_id,
+    has_active_request
 )
 from utils import (
     validate_datetime,
@@ -48,6 +50,33 @@ logger = logging.getLogger(__name__)
 # Состояния пользователей (для многошаговых форм)
 # Храним в памяти, т.к. после перезапуска бота формы всё равно сбросятся
 user_states = {}
+
+# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
+
+async def check_active_request_and_notify(user_id, update: Update) -> bool:
+    """
+    Проверяет, есть ли у пользователя активная заявка
+    Если есть - отправляет сообщение и возвращает True
+    Если нет - возвращает False
+    """
+    has_active, request_type = has_active_request(user_id)
+    
+    if has_active:
+        # Определяем какой тип заявки для красивого вывода
+        type_display = "⭐️ Звезды" if request_type == "stars" else "🎁 Premium"
+        
+        await update.message.reply_text(
+            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+            f"У вас уже есть активная заявка на {type_display}!\n"
+            f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+            f"Дождитесь обработки текущей заявки.\n\n"
+            f"Используйте /status чтобы проверить статус.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        return True
+    
+    return False
 
 # ================== КОМАНДЫ ==================
 
@@ -79,9 +108,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "🤝 Вы пришли по ссылке друга!\n"
                     "Дождитесь выполнения его условий или подайте свою заявку!"
                 )
-            else:
-                # Может быть уже был рефералом или пригласивший не найден
-                pass
     
     # Отправляем приветствие с главным меню
     await update.message.reply_text(
@@ -91,7 +117,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Команда /status - показывает прогресс рефералов
+    Команда /status - показывает прогресс рефералов и статус заявки
     """
     user_id = update.effective_user.id
     db_user = get_user(user_id)
@@ -99,17 +125,20 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     referrals_count = db_user["referrals"]["count"]
     
     # Проверяем активные заявки
-    active_stars = db_user["active_requests"]["stars"]
-    active_premium = db_user["active_requests"]["premium"]
+    has_active, request_type = has_active_request(user_id)
+    
+    if has_active:
+        active_text = f"✅ Есть (тип: {'⭐️ Звезды' if request_type == 'stars' else '🎁 Premium'})"
+    else:
+        active_text = "❌ Нет активных заявок"
     
     status_text = f"""
 📊 <b>Ваш статус</b>
 
-👥 Приглашено друзей: {referrals_count} из 3
+👥 Приглашено друзей: {referrals_count}
 
-<b>Активные заявки:</b>
-{'⭐️ Звезды: Есть' if active_stars else '⭐️ Звезды: Нет'}
-{'🎁 Premium: Есть' if active_premium else '🎁 Premium: Нет'}
+<b>Активная заявка:</b>
+{active_text}
 
 <b>Реферальная ссылка:</b>
 {format_referral_link(context.bot.username, db_user["username"])}
@@ -152,14 +181,15 @@ async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"✅ Заявка {request_id} удалена!\n"
-        f"Пользователь может создать новую заявку на {request_type}."
+        f"Пользователь может создать новую заявку."
     )
     
-    # Уведомляем пользователя (опционально)
+    # Уведомляем пользователя
     try:
         await context.bot.send_message(
             target_user_id,
-            "✅ Ваша предыдущая заявка обработана. Вы можете создать новую!"
+            "✅ Ваша предыдущая заявка обработана. Вы можете создать новую!",
+            reply_markup=get_main_keyboard()
         )
     except:
         pass
@@ -214,14 +244,9 @@ async def start_stars_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     Шаг 1: Начало заявки на Звезды
     """
     user_id = update.effective_user.id
-    db_user = get_user(user_id)
     
-    # Проверяем, нет ли уже активной заявки
-    if db_user["active_requests"]["stars"]:
-        await update.message.reply_text(
-            "❌ У вас уже есть активная заявка на Звезды!\n"
-            "Дождитесь ее обработки."
-        )
+    # Проверяем, нет ли уже активной заявки (ЛЮБОЙ)
+    if await check_active_request_and_notify(user_id, update):
         return
     
     # Запрашиваем количество
@@ -270,7 +295,7 @@ async def process_stars_username(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    # Просто сохраняем (проверять особо нечего)
+    # Добавляем @ если нет
     if not text.startswith('@'):
         text = '@' + text
     
@@ -324,7 +349,8 @@ async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_T
     # Отправляем пользователю подтверждение
     await update.message.reply_text(
         "✅ Ваша заявка на Звезды отправлена на рассмотрение!\n"
-        "Ожидайте ответа администратора."
+        "Ожидайте ответа администратора.",
+        reply_markup=get_main_keyboard()
     )
     
     # Отправляем админу
@@ -351,14 +377,9 @@ async def start_premium_request(update: Update, context: ContextTypes.DEFAULT_TY
     Шаг 1: Начало заявки на Premium (выбор срока)
     """
     user_id = update.effective_user.id
-    db_user = get_user(user_id)
     
-    # Проверяем, нет ли уже активной заявки
-    if db_user["active_requests"]["premium"]:
-        await update.message.reply_text(
-            "❌ У вас уже есть активная заявка на Premium!\n"
-            "Дождитесь ее обработки."
-        )
+    # Проверяем, нет ли уже активной заявки (ЛЮБОЙ)
+    if await check_active_request_and_notify(user_id, update):
         return
     
     # Отправляем инлайн-кнопки для выбора срока
@@ -375,6 +396,15 @@ async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     
     user_id = query.from_user.id
+    
+    # Еще раз проверяем активную заявку (на случай если создал пока выбирал)
+    has_active, _ = has_active_request(user_id)
+    if has_active:
+        await query.edit_message_text(
+            "❌ У вас уже есть активная заявка!\n"
+            "Дождитесь ее обработки."
+        )
+        return
     
     # Получаем выбранный срок из callback_data
     # callback_data имеет формат "premium_X", где X - количество месяцев
@@ -416,8 +446,17 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(result)
         return
     
-    # Дата корректна
-    datetime_obj = result
+    # Еще раз проверяем активную заявку
+    has_active, _ = has_active_request(user_id)
+    if has_active:
+        await update.message.reply_text(
+            "❌ У вас уже есть активная заявка!\n"
+            "Дождитесь ее обработки.",
+            reply_markup=get_main_keyboard()
+        )
+        user_states.pop(user_id, None)
+        context.user_data.clear()
+        return
     
     # Получаем сохраненные данные
     months = context.user_data.get('premium_duration')
@@ -441,7 +480,8 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
     # Отправляем пользователю подтверждение
     await update.message.reply_text(
         "✅ Ваша заявка на Premium отправлена на рассмотрение!\n"
-        "Ожидайте ответа администратора."
+        "Ожидайте ответа администратора.",
+        reply_markup=get_main_keyboard()
     )
     
     # Отправляем админу
@@ -485,19 +525,12 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("❌ Заявка не найдена!")
         return
     
-    # Получаем данные пользователя для реферальной ссылки
-    db_user = get_user(user_id)
-    bot_username = context.bot.username
-    
-    # Формируем реферальную ссылку
-    referral_link = format_referral_link(bot_username, db_user["username"])
-    
     # Отправляем пользователю условия в зависимости от типа заявки
     try:
         if request_data["type"] == "stars":
-            conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+            conditions = STARS_CONDITIONS
         else:
-            conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+            conditions = PREMIUM_CONDITIONS
         
         await context.bot.send_message(
             user_id,
@@ -545,6 +578,7 @@ def main():
     
     # Запускаем бота
     print("Бот запущен! Нажмите Ctrl+C для остановки.")
+    print("Теперь можно создать только ОДНУ активную заявку!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
