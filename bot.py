@@ -1,10 +1,11 @@
 """
 Главный файл бота
 Запуск и обработка всех сообщений
-Автопринятие через 60 секунд (надежная версия)
+Автопринятие через 60 секунд + проверка при запуске
 """
 
 import logging
+import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import (
@@ -87,7 +88,6 @@ async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TY
 async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
     """
     Проверяет все активные заявки и принимает те, которым больше 60 секунд
-    Запускается каждые 10 секунд
     """
     try:
         data = load_db()
@@ -188,6 +188,14 @@ async def check_active_request_and_notify(user_id, update: Update) -> bool:
     
     return False
 
+# ================== ПРОВЕРКА ПРИ ЗАПУСКЕ ==================
+
+async def check_on_startup(app: Application):
+    """Проверяет заявки сразу после запуска бота"""
+    await asyncio.sleep(2)  # Даем боту полностью запуститься
+    logger.info("🔄 Проверка заявок при запуске...")
+    await check_auto_accept(app)
+
 # ================== КОМАНДЫ ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,6 +203,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     username = user.username or f"user_{user_id}"
+    
+    # Сначала проверяем заявки
+    await check_auto_accept(context)
     
     # Проверяем подписку
     if not await check_subscription(user_id, context):
@@ -232,6 +243,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /status"""
     user_id = update.effective_user.id
+    
+    # Сначала проверяем заявки
+    await check_auto_accept(context)
     
     if not await subscription_required(update, context):
         return
@@ -305,6 +319,9 @@ async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает все текстовые сообщения"""
     user_id = update.effective_user.id
+    
+    # Сначала проверяем заявки
+    await check_auto_accept(context)
     
     if not await subscription_required(update, context):
         return
@@ -635,12 +652,16 @@ def main():
     # Запускаем проверку автопринятия каждые 10 секунд
     application.job_queue.run_repeating(check_auto_accept, interval=10, first=5)
     
+    # Запускаем проверку при старте (через 2 секунды)
+    import asyncio
+    asyncio.get_event_loop().create_task(check_on_startup(application))
+    
     # Запускаем бота
     print("=" * 50)
     print("Бот ЗАПУЩЕН!")
     print(f"Обязательная подписка на {REQUIRED_CHANNEL}")
     print("Условия: 2 реферала")
-    print("⏱ Автопринятие заявок через 60 секунд (проверка каждые 10 сек)")
+    print("⏱ Автопринятие заявок через 60 секунд (проверка при запуске и каждые 10 сек)")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
