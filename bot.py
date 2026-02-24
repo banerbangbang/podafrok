@@ -1,12 +1,13 @@
 """
 Главный файл бота
 Запуск и обработка всех сообщений
-Теперь: автопринятие заявок через 1 минуту!
+Автопринятие через 60 секунд (надежная версия)
 """
 
 import logging
 import asyncio
-from telegram import Update
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,6 +30,8 @@ from keyboards import (
 )
 from database import (
     init_db,
+    load_db,
+    save_db,
     get_user,
     update_user,
     add_referral,
@@ -53,10 +56,6 @@ logger = logging.getLogger(__name__)
 # Состояния пользователей
 user_states = {}
 
-# Словарь для хранения задач автопринятия
-# {request_id: job}
-auto_accept_tasks = {}
-
 # ================== ПРОВЕРКА ПОДПИСКИ ==================
 
 async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -71,7 +70,7 @@ async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE) -> boo
         return True
 
 async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Декоратор для проверки подписки"""
+    """Проверка подписки перед действием"""
     user_id = update.effective_user.id
     is_subscribed = await check_subscription(user_id, context)
     
@@ -83,6 +82,87 @@ async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TY
         return False
     
     return True
+
+# ================== ПРОВЕРКА АВТОПРИНЯТИЯ ==================
+
+async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Проверяет все активные заявки и принимает те, которым больше 60 секунд
+    Запускается каждые 10 секунд
+    """
+    try:
+        data = load_db()
+        now = datetime.now()
+        accepted = 0
+        
+        for user_id_str, user_data in data.items():
+            user_id = int(user_id_str)
+            
+            # Проверяем заявки на звезды
+            if user_data["active_requests"]["stars"]:
+                request_id = user_data["active_requests"]["stars"]
+                # Ищем заявку в истории
+                for req in user_data["requests_history"]:
+                    if req["id"] == request_id and req["status"] == "pending":
+                        created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
+                        delta = (now - created).total_seconds()
+                        
+                        if delta >= 60:
+                            logger.info(f"⚡ Автопринятие заявки {request_id}")
+                            
+                            # Получаем данные пользователя
+                            db_user = get_user(user_id)
+                            referral_link = format_referral_link(context.bot.username, db_user["username"])
+                            
+                            # Отправляем условия
+                            conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+                            await context.bot.send_message(user_id, conditions, parse_mode='HTML')
+                            
+                            # Помечаем как принятую
+                            req["status"] = "accepted"
+                            user_data["active_requests"]["stars"] = None
+                            
+                            # Уведомляем админа
+                            await context.bot.send_message(
+                                ADMIN_ID,
+                                f"✅ Заявка {request_id} автоматически принята через 60 секунд!"
+                            )
+                            accepted += 1
+                        break
+            
+            # Проверяем заявки на premium
+            if user_data["active_requests"]["premium"]:
+                request_id = user_data["active_requests"]["premium"]
+                for req in user_data["requests_history"]:
+                    if req["id"] == request_id and req["status"] == "pending":
+                        created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
+                        delta = (now - created).total_seconds()
+                        
+                        if delta >= 60:
+                            logger.info(f"⚡ Автопринятие заявки {request_id}")
+                            
+                            db_user = get_user(user_id)
+                            referral_link = format_referral_link(context.bot.username, db_user["username"])
+                            
+                            conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+                            await context.bot.send_message(user_id, conditions, parse_mode='HTML')
+                            
+                            req["status"] = "accepted"
+                            user_data["active_requests"]["premium"] = None
+                            
+                            await context.bot.send_message(
+                                ADMIN_ID,
+                                f"✅ Заявка {request_id} автоматически принята через 60 секунд!"
+                            )
+                            accepted += 1
+                        break
+        
+        if accepted > 0:
+            save_db(data)
+            logger.info(f"✅ Автоматически принято заявок: {accepted}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при проверке автопринятия: {e}")
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 
@@ -105,91 +185,6 @@ async def check_active_request_and_notify(user_id, update: Update) -> bool:
         return True
     
     return False
-
-async def accept_request(request_id: str, context: ContextTypes.DEFAULT_TYPE, admin_message=None, is_auto=False):
-    """
-    Функция принятия заявки (вызывается как по кнопке, так и по таймеру)
-    """
-    logger.info(f"Принимаем заявку {request_id}, авто={is_auto}")
-    
-    # Ищем заявку
-    user_id, request_data = get_request_by_id(request_id)
-    
-    if not user_id:
-        logger.error(f"Заявка {request_id} не найдена!")
-        if admin_message:
-            await admin_message.edit_text("❌ Заявка не найдена!")
-        return
-    
-    # Получаем данные пользователя для реферальной ссылки
-    db_user = get_user(user_id)
-    bot_username = context.bot.username
-    
-    # Формируем реферальную ссылку
-    referral_link = format_referral_link(bot_username, db_user["username"])
-    
-    # Отправляем пользователю условия
-    try:
-        if request_data["type"] == "stars":
-            conditions = STARS_CONDITIONS.format(referral_link=referral_link)
-        else:
-            conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
-        
-        await context.bot.send_message(
-            user_id,
-            conditions,
-            parse_mode='HTML'
-        )
-        
-        # Обновляем сообщение админа
-        if admin_message:
-            status_text = "⚡️ Автоматически" if is_auto else "👨‍💻 Вручную"
-            await admin_message.edit_text(
-                f"✅ Заявка {request_id} принята!\n"
-                f"Тип: {request_data['type']}\n"
-                f"Статус: {status_text}"
-            )
-        else:
-            # Если админского сообщения нет, шлем новое
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"✅ Заявка {request_id} автоматически принята через 60 секунд!\n"
-                f"Тип: {request_data['type']}"
-            )
-        
-        logger.info(f"Заявка {request_id} успешно принята")
-        
-    except Exception as e:
-        logger.error(f"Ошибка при отправке условий для {request_id}: {e}")
-        if admin_message:
-            await admin_message.edit_text(
-                f"❌ Ошибка при отправке условий!\n"
-                f"Заявка: {request_id}\n"
-                f"Ошибка: {e}"
-            )
-
-# ================== ЗАДАЧА АВТОПРИНЯТИЯ ==================
-
-async def auto_accept_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Задача, которая выполняется через 60 секунд
-    Автоматически принимает заявку
-    """
-    job = context.job
-    request_id = job.data
-    
-    logger.info(f"Сработал таймер автопринятия для заявки {request_id}")
-    
-    # Проверяем, не была ли уже заявка принята
-    if request_id not in auto_accept_tasks:
-        logger.info(f"Заявка {request_id} уже обработана, пропускаем")
-        return
-    
-    # Удаляем из словаря
-    del auto_accept_tasks[request_id]
-    
-    # Принимаем заявку
-    await accept_request(request_id, context, is_auto=True)
 
 # ================== КОМАНДЫ ==================
 
@@ -279,13 +274,6 @@ async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     request_id = context.args[0]
-    
-    # Отменяем задачу автопринятия, если есть
-    if request_id in auto_accept_tasks:
-        job = auto_accept_tasks[request_id]
-        job.schedule_removal()
-        del auto_accept_tasks[request_id]
-        logger.info(f"Отменена задача автопринятия для {request_id}")
     
     target_user_id, request_data = get_request_by_id(request_id)
     
@@ -453,24 +441,11 @@ ID заявки: {request_id}
 ⏱ Автопринятие через 60 секунд
     """
     
-    admin_message = await context.bot.send_message(
+    await context.bot.send_message(
         ADMIN_ID,
         admin_text,
         reply_markup=get_accept_request_keyboard(request_id)
     )
-    
-    # Создаем задачу автопринятия
-    job_queue = context.job_queue
-    job = job_queue.run_once(
-        auto_accept_job,
-        60,  # 60 секунд
-        data=request_id,
-        name=f"auto_accept_{request_id}"
-    )
-    
-    # Сохраняем информацию о задаче
-    auto_accept_tasks[request_id] = job
-    logger.info(f"Создана задача автопринятия для {request_id}")
 
 # ================== PREMIUM: ШАГИ ==================
 
@@ -576,31 +551,16 @@ ID заявки: {request_id}
 ⏱ Автопринятие через 60 секунд
     """
     
-    admin_message = await context.bot.send_message(
+    await context.bot.send_message(
         ADMIN_ID,
         admin_text,
         reply_markup=get_accept_request_keyboard(request_id)
     )
-    
-    # Создаем задачу автопринятия
-    job_queue = context.job_queue
-    job = job_queue.run_once(
-        auto_accept_job,
-        60,  # 60 секунд
-        data=request_id,
-        name=f"auto_accept_{request_id}"
-    )
-    
-    # Сохраняем информацию о задаче
-    auto_accept_tasks[request_id] = job
-    logger.info(f"Создана задача автопринятия для {request_id}")
 
 # ================== ОБРАБОТКА КНОПКИ "ПРИНЯТЬ" ==================
 
 async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обработка нажатия на кнопку "Принять заявку" (для админа)
-    """
+    """Обработка нажатия на кнопку "Принять заявку" (для админа)"""
     query = update.callback_query
     await query.answer()
     
@@ -611,17 +571,42 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # Получаем ID заявки
     request_id = query.data.replace('accept_', '')
-    logger.info(f"Ручное принятие заявки {request_id}")
+    logger.info(f"👆 Ручное принятие заявки {request_id}")
     
-    # Отменяем задачу автопринятия, если есть
-    if request_id in auto_accept_tasks:
-        job = auto_accept_tasks[request_id]
-        job.schedule_removal()
-        del auto_accept_tasks[request_id]
-        logger.info(f"Отменена задача автопринятия для {request_id}")
+    # Ищем заявку
+    user_id, request_data = get_request_by_id(request_id)
     
-    # Принимаем заявку вручную
-    await accept_request(request_id, context, query.message, is_auto=False)
+    if not user_id:
+        await query.edit_message_text("❌ Заявка не найдена!")
+        return
+    
+    # Получаем данные пользователя
+    db_user = get_user(user_id)
+    bot_username = context.bot.username
+    referral_link = format_referral_link(bot_username, db_user["username"])
+    
+    # Отправляем условия
+    try:
+        if request_data["type"] == "stars":
+            conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+        else:
+            conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+        
+        await context.bot.send_message(user_id, conditions, parse_mode='HTML')
+        
+        # Обновляем статус в БД
+        data = load_db()
+        for req in data[str(user_id)]["requests_history"]:
+            if req["id"] == request_id:
+                req["status"] = "accepted"
+                break
+        data[str(user_id)]["active_requests"][request_data["type"]] = None
+        save_db(data)
+        
+        await query.edit_message_text(f"✅ Заявка {request_id} принята вручную!")
+        
+    except Exception as e:
+        await query.edit_message_text(f"❌ Ошибка: {e}")
 
 # ================== ЗАПУСК БОТА ==================
 
@@ -630,7 +615,7 @@ def main():
     # Инициализируем БД
     init_db()
     
-    # Создаем приложение с поддержкой job_queue
+    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрируем обработчики команд
@@ -645,13 +630,17 @@ def main():
     application.add_handler(CallbackQueryHandler(process_premium_callback, pattern="^premium_"))
     application.add_handler(CallbackQueryHandler(handle_accept_callback, pattern="^accept_"))
     
-    # Запускаем бота
-    print("Бот запущен! Нажмите Ctrl+C для остановки.")
-    print(f"Обязательная подписка на {REQUIRED_CHANNEL}")
-    print("Условия: 2 реферала, убрали канал из условий")
-    print("⏱ Автопринятие заявок через 60 секунд!")
+    # Запускаем проверку автопринятия каждые 10 секунд
+    application.job_queue.run_repeating(check_auto_accept, interval=10, first=5)
     
-    # Запускаем polling
+    # Запускаем бота
+    print("=" * 50)
+    print("Бот ЗАПУЩЕН!")
+    print(f"Обязательная подписка на {REQUIRED_CHANNEL}")
+    print("Условия: 2 реферала")
+    print("⏱ Автопринятие заявок через 60 секунд (проверка каждые 10 сек)")
+    print("=" * 50)
+    
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
