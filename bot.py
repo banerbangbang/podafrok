@@ -5,9 +5,8 @@
 """
 
 import logging
-import asyncio
-from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from datetime import datetime
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -101,7 +100,6 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
             # Проверяем заявки на звезды
             if user_data["active_requests"]["stars"]:
                 request_id = user_data["active_requests"]["stars"]
-                # Ищем заявку в истории
                 for req in user_data["requests_history"]:
                     if req["id"] == request_id and req["status"] == "pending":
                         created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
@@ -110,19 +108,19 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
                         if delta >= 60:
                             logger.info(f"⚡ Автопринятие заявки {request_id}")
                             
-                            # Получаем данные пользователя
                             db_user = get_user(user_id)
                             referral_link = format_referral_link(context.bot.username, db_user["username"])
                             
-                            # Отправляем условия
-                            conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+                            if req["type"] == "stars":
+                                conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+                            else:
+                                conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+                            
                             await context.bot.send_message(user_id, conditions, parse_mode='HTML')
                             
-                            # Помечаем как принятую
                             req["status"] = "accepted"
                             user_data["active_requests"]["stars"] = None
                             
-                            # Уведомляем админа
                             await context.bot.send_message(
                                 ADMIN_ID,
                                 f"✅ Заявка {request_id} автоматически принята через 60 секунд!"
@@ -144,7 +142,11 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
                             db_user = get_user(user_id)
                             referral_link = format_referral_link(context.bot.username, db_user["username"])
                             
-                            conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+                            if req["type"] == "stars":
+                                conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+                            else:
+                                conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+                            
                             await context.bot.send_message(user_id, conditions, parse_mode='HTML')
                             
                             req["status"] = "accepted"
