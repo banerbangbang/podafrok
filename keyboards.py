@@ -5,12 +5,6 @@
 from telegram import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 def get_main_keyboard():
-    """
-    Главное меню с кнопками:
-    - Звезды 🎁
-    - TG Premium ⭐️
-    - О боте ℹ️
-    """
     keyboard = [
         [KeyboardButton("Звезды 🎁")],
         [KeyboardButton("TG Premium ⭐️")],
@@ -19,9 +13,6 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_premium_duration_keyboard():
-    """
-    Инлайн клавиатура для выбора срока Premium
-    """
     keyboard = [
         [InlineKeyboardButton("1 месяц", callback_data="premium_1")],
         [InlineKeyboardButton("3 месяца", callback_data="premium_3")],
@@ -30,10 +21,6 @@ def get_premium_duration_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_accept_request_keyboard(request_id):
-    """
-    Инлайн клавиатура с кнопкой "Принять заявку"
-    Для отправки админу
-    """
     keyboard = [
         [InlineKeyboardButton("✅ Принять заявку", callback_data=f"accept_{request_id}")]
     ]
