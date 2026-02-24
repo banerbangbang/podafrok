@@ -38,13 +38,3 @@ def get_accept_request_keyboard(request_id):
         [InlineKeyboardButton("✅ Принять заявку", callback_data=f"accept_{request_id}")]
     ]
     return InlineKeyboardMarkup(keyboard)
-
-def get_admin_commands():
-    """
-    Подсказка для админа (не клавиатура, а просто текст)
-    """
-    return """
-👨‍💻 <b>Команды администратора:</b>
-/dell ID_заявки - удалить заявку (после выдачи подарка)
-Пример: /dell stars_5408585719_1708700000
-"""
