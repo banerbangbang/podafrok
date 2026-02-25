@@ -80,7 +80,6 @@ def update_user(user_id, updates):
 def has_active_request(user_id):
     """
     Проверяет, есть ли у пользователя активная заявка
-    Возвращает True/False
     """
     data = load_db()
     user_id_str = str(user_id)
@@ -88,7 +87,6 @@ def has_active_request(user_id):
     if user_id_str not in data:
         return False
     
-    # Прямая проверка данных
     if data[user_id_str]["active_requests"]["stars"] is not None:
         return True
     if data[user_id_str]["active_requests"]["premium"] is not None:
@@ -98,7 +96,7 @@ def has_active_request(user_id):
 
 def get_active_request_type(user_id):
     """
-    Возвращает тип активной заявки или None
+    Возвращает тип активной заявки
     """
     data = load_db()
     user_id_str = str(user_id)
@@ -144,37 +142,46 @@ def add_referral(inviter_username, new_user_id):
 def add_active_request(user_id, request_type, request_data):
     """
     Добавляет активную заявку пользователю
-    ТОЛЬКО ОДНА ЗАЯВКА - НАВСЕГДА!
+    ТОЛЬКО ОДНА ЗАЯВКА НА ПОЛЬЗОВАТЕЛЯ
     """
-    # Загружаем данные напрямую
+    # Загружаем данные
     data = load_db()
     user_id_str = str(user_id)
     
-    # Если пользователя нет - создаем
-    if user_id_str not in data:
+    # Если пользователь уже есть в базе - проверяем его заявки
+    if user_id_str in data:
+        # Проверяем заявки на звезды
+        if data[user_id_str]["active_requests"]["stars"] is not None:
+            print(f"❌ У пользователя {user_id} уже есть заявка на звезды: {data[user_id_str]['active_requests']['stars']}")
+            return False
+        
+        # Проверяем заявки на premium
+        if data[user_id_str]["active_requests"]["premium"] is not None:
+            print(f"❌ У пользователя {user_id} уже есть заявка на premium: {data[user_id_str]['active_requests']['premium']}")
+            return False
+        
+        # Проверяем историю на случай зависших заявок
+        for req in data[user_id_str]["requests_history"]:
+            if req["status"] == "pending":
+                print(f"❌ Найдена pending заявка в истории: {req['id']}")
+                return False
+    
+    # Если пользователя нет в базе - создаем
+    else:
         data[user_id_str] = {
             "username": request_data.get("user_username"),
             "first_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "referrals": {"count": 0, "referred_users": []},
+            "referrals": {
+                "count": 0,
+                "referred_users": []
+            },
             "invited_by": None,
-            "active_requests": {"stars": None, "premium": None},
+            "active_requests": {
+                "stars": None,
+                "premium": None
+            },
             "requests_history": []
         }
-    
-    # ЖЕСТОЧАЙШАЯ ПРОВЕРКА - смотрим оба типа
-    if data[user_id_str]["active_requests"]["stars"] is not None:
-        print(f"❌ БЛОКИРОВКА: У пользователя {user_id} уже есть заявка на звезды")
-        return False
-    
-    if data[user_id_str]["active_requests"]["premium"] is not None:
-        print(f"❌ БЛОКИРОВКА: У пользователя {user_id} уже есть заявка на premium")
-        return False
-    
-    # Проверка через историю (на случай если active_requests сбросился)
-    for req in data[user_id_str]["requests_history"]:
-        if req["status"] == "pending":
-            print(f"❌ БЛОКИРОВКА: Найдена pending заявка в истории {req['id']}")
-            return False
     
     # Генерируем ID заявки
     from utils import generate_request_id
@@ -195,12 +202,12 @@ def add_active_request(user_id, request_type, request_data):
     data[user_id_str]["requests_history"].append(full_request)
     
     save_db(data)
-    print(f"✅ Заявка {request_id} создана")
+    print(f"✅ Заявка {request_id} создана для пользователя {user_id}")
     return request_id
 
 def remove_active_request(user_id, request_type):
     """
-    Удаляет активную заявку (после выдачи)
+    Удаляет активную заявку
     """
     data = load_db()
     user_id_str = str(user_id)
@@ -218,7 +225,7 @@ def remove_active_request(user_id, request_type):
             break
     
     save_db(data)
-    print(f"✅ Заявка {request_id} удалена")
+    print(f"✅ Заявка {request_id} удалена у пользователя {user_id}")
     return request_id
 
 def get_request_by_id(request_id):
