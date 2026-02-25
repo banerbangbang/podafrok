@@ -163,22 +163,36 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
 
 async def check_active_request_and_notify(user_id, update: Update) -> bool:
     """Проверяет, есть ли у пользователя активная заявка"""
-    has_active = has_active_request(user_id)
+    # Загружаем данные напрямую из БД для надежности
+    data = load_db()
+    user_id_str = str(user_id)
     
-    if has_active:
-        request_type = get_active_request_type(user_id)
-        type_display = "⭐️ Звезды" if request_type == "stars" else "🎁 Premium"
+    if user_id_str in data:
+        if data[user_id_str]["active_requests"]["stars"] is not None:
+            type_display = "⭐️ Звезды"
+            await update.message.reply_text(
+                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+                f"У вас уже есть активная заявка на {type_display}!\n"
+                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+                f"Дождитесь обработки текущей заявки.\n\n"
+                f"Используйте /status чтобы проверить статус.",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            return True
         
-        await update.message.reply_text(
-            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-            f"У вас уже есть активная заявка на {type_display}!\n"
-            f"Можно выбрать только <b>ОДИН</b> подарок.\n"
-            f"Дождитесь обработки текущей заявки.\n\n"
-            f"Используйте /status чтобы проверить статус.",
-            parse_mode='HTML',
-            reply_markup=get_main_keyboard()
-        )
-        return True
+        if data[user_id_str]["active_requests"]["premium"] is not None:
+            type_display = "🎁 Premium"
+            await update.message.reply_text(
+                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+                f"У вас уже есть активная заявка на {type_display}!\n"
+                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+                f"Дождитесь обработки текущей заявки.\n\n"
+                f"Используйте /status чтобы проверить статус.",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            return True
     
     return False
 
@@ -235,8 +249,19 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_user = get_user(user_id)
     referrals_count = db_user["referrals"]["count"]
     
-    has_active = has_active_request(user_id)
-    request_type = get_active_request_type(user_id)
+    # Прямая проверка из БД
+    data = load_db()
+    user_id_str = str(user_id)
+    has_active = False
+    request_type = None
+    
+    if user_id_str in data:
+        if data[user_id_str]["active_requests"]["stars"]:
+            has_active = True
+            request_type = "stars"
+        elif data[user_id_str]["active_requests"]["premium"]:
+            has_active = True
+            request_type = "premium"
     
     if has_active:
         active_text = f"✅ Есть (тип: {'⭐️ Звезды' if request_type == 'stars' else '🎁 Premium'})"
@@ -341,10 +366,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================== ЗВЕЗДЫ: ШАГИ ==================
 
 async def start_stars_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: Начало заявки на Звезды"""
     user_id = update.effective_user.id
     
-    if await check_active_request_and_notify(user_id, update):
-        return
+    # ПРЯМАЯ ПРОВЕРКА ИЗ БД
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str in data:
+        if data[user_id_str]["active_requests"]["stars"] is not None:
+            await update.message.reply_text(
+                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+                f"У вас уже есть активная заявка на ⭐️ Звезды!\n"
+                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+                f"Дождитесь обработки текущей заявки.\n\n"
+                f"Используйте /status чтобы проверить статус.",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        if data[user_id_str]["active_requests"]["premium"] is not None:
+            await update.message.reply_text(
+                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+                f"У вас уже есть активная заявка на 🎁 Premium!\n"
+                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+                f"Дождитесь обработки текущей заявки.\n\n"
+                f"Используйте /status чтобы проверить статус.",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            return
     
     user_states[user_id] = {"action": "waiting_stars_amount"}
     
@@ -412,6 +464,29 @@ async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_T
         "user_username": update.effective_user.username or f"id{user_id}"
     }
     
+    # Последняя проверка перед созданием
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str in data:
+        if data[user_id_str]["active_requests"]["stars"] is not None:
+            await update.message.reply_text(
+                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
+                reply_markup=get_main_keyboard()
+            )
+            user_states.pop(user_id, None)
+            context.user_data.clear()
+            return
+        
+        if data[user_id_str]["active_requests"]["premium"] is not None:
+            await update.message.reply_text(
+                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
+                reply_markup=get_main_keyboard()
+            )
+            user_states.pop(user_id, None)
+            context.user_data.clear()
+            return
+    
     request_id = add_active_request(user_id, "stars", request_data)
     
     if not request_id:
@@ -453,10 +528,37 @@ ID заявки: {request_id}
 # ================== PREMIUM: ШАГИ ==================
 
 async def start_premium_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: Начало заявки на Premium"""
     user_id = update.effective_user.id
     
-    if await check_active_request_and_notify(user_id, update):
-        return
+    # ПРЯМАЯ ПРОВЕРКА ИЗ БД
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str in data:
+        if data[user_id_str]["active_requests"]["stars"] is not None:
+            await update.message.reply_text(
+                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+                f"У вас уже есть активная заявка на ⭐️ Звезды!\n"
+                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+                f"Дождитесь обработки текущей заявки.\n\n"
+                f"Используйте /status чтобы проверить статус.",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        if data[user_id_str]["active_requests"]["premium"] is not None:
+            await update.message.reply_text(
+                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+                f"У вас уже есть активная заявка на 🎁 Premium!\n"
+                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+                f"Дождитесь обработки текущей заявки.\n\n"
+                f"Используйте /status чтобы проверить статус.",
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+            return
     
     await update.message.reply_text(
         "На сколько месяцев хотите получить Premium?",
@@ -469,12 +571,24 @@ async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT
     
     user_id = query.from_user.id
     
-    if has_active_request(user_id):
-        await query.edit_message_text(
-            "❌ У вас уже есть активная заявка!\n"
-            "Дождитесь ее обработки."
-        )
-        return
+    # Проверка перед выбором срока
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str in data:
+        if data[user_id_str]["active_requests"]["stars"] is not None:
+            await query.edit_message_text(
+                "❌ У вас уже есть активная заявка на Звезды!\n"
+                "Дождитесь ее обработки."
+            )
+            return
+        
+        if data[user_id_str]["active_requests"]["premium"] is not None:
+            await query.edit_message_text(
+                "❌ У вас уже есть активная заявка на Premium!\n"
+                "Дождитесь ее обработки."
+            )
+            return
     
     months = int(query.data.split('_')[1])
     
@@ -506,15 +620,28 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(result)
         return
     
-    if has_active_request(user_id):
-        await update.message.reply_text(
-            "❌ У вас уже есть активная заявка!\n"
-            "Дождитесь ее обработки.",
-            reply_markup=get_main_keyboard()
-        )
-        user_states.pop(user_id, None)
-        context.user_data.clear()
-        return
+    # Последняя проверка перед созданием
+    data = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str in data:
+        if data[user_id_str]["active_requests"]["stars"] is not None:
+            await update.message.reply_text(
+                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
+                reply_markup=get_main_keyboard()
+            )
+            user_states.pop(user_id, None)
+            context.user_data.clear()
+            return
+        
+        if data[user_id_str]["active_requests"]["premium"] is not None:
+            await update.message.reply_text(
+                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
+                reply_markup=get_main_keyboard()
+            )
+            user_states.pop(user_id, None)
+            context.user_data.clear()
+            return
     
     months = context.user_data.get('premium_duration')
     duration_name = context.user_data.get('premium_duration_name')
