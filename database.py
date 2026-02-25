@@ -35,24 +35,26 @@ def save_db(data):
 def get_user(user_id):
     """
     Получает данные конкретного пользователя
+    Если пользователя нет, создает базовую структуру
     """
     data = load_db()
     user_id_str = str(user_id)
     
     if user_id_str not in data:
+        # Новый пользователь
         data[user_id_str] = {
-            "username": None,
+            "username": None,  # @username
             "first_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "referrals": {
-                "count": 0,
-                "referred_users": []
+                "count": 0,  # сколько уникальных пригласил
+                "referred_users": []  # список ID тех, кого пригласил
             },
-            "invited_by": None,
+            "invited_by": None,  # кто пригласил этого пользователя
             "active_requests": {
-                "stars": None,
-                "premium": None
+                "stars": None,  # ID активной заявки на звезды или None
+                "premium": None  # ID активной заявки на premium или None
             },
-            "requests_history": []
+            "requests_history": []  # история всех заявок
         }
         save_db(data)
     
@@ -68,6 +70,7 @@ def update_user(user_id, updates):
     if user_id_str not in data:
         data[user_id_str] = {}
     
+    # Рекурсивно обновляем словарь
     for key, value in updates.items():
         if isinstance(value, dict) and key in data[user_id_str] and isinstance(data[user_id_str][key], dict):
             data[user_id_str][key].update(value)
@@ -79,109 +82,92 @@ def update_user(user_id, updates):
 
 def has_active_request(user_id):
     """
-    Проверяет, есть ли у пользователя активная заявка
+    Проверяет, есть ли у пользователя активная заявка (любого типа)
+    Проверяет по статусу в истории, а не только по active_requests
+    Возвращает (True, тип) или (False, None)
     """
+    user = get_user(user_id)
+    
+    # Проверяем активные заявки в истории
+    for req in user["requests_history"]:
+        if req["status"] == "pending":  # Если есть хоть одна pending заявка
+            return True, req["type"]
+    
+    # Если в истории нет pending, но в active_requests что-то есть - очищаем
     data = load_db()
     user_id_str = str(user_id)
+    changed = False
     
-    if user_id_str not in data:
-        return False
+    if user["active_requests"]["stars"]:
+        # Проверяем, есть ли такая заявка в истории со статусом pending
+        found = False
+        for req in user["requests_history"]:
+            if req["id"] == user["active_requests"]["stars"] and req["status"] == "pending":
+                found = True
+                break
+        
+        if not found:
+            data[user_id_str]["active_requests"]["stars"] = None
+            changed = True
     
-    if data[user_id_str]["active_requests"]["stars"] is not None:
-        return True
-    if data[user_id_str]["active_requests"]["premium"] is not None:
-        return True
+    if user["active_requests"]["premium"]:
+        found = False
+        for req in user["requests_history"]:
+            if req["id"] == user["active_requests"]["premium"] and req["status"] == "pending":
+                found = True
+                break
+        
+        if not found:
+            data[user_id_str]["active_requests"]["premium"] = None
+            changed = True
     
-    return False
+    if changed:
+        save_db(data)
+        # Перезагружаем пользователя
+        user = get_user(user_id)
+    
+    # Финальная проверка
+    if user["active_requests"]["stars"] or user["active_requests"]["premium"]:
+        # Двойная проверка - смотрим тип
+        if user["active_requests"]["stars"]:
+            return True, "stars"
+        else:
+            return True, "premium"
+    
+    return False, None
 
-def get_active_request_type(user_id):
+def can_create_request(user_id):
     """
-    Возвращает тип активной заявки
+    Проверяет, может ли пользователь создать новую заявку
+    Возвращает (True, None) если можно, или (False, причина) если нельзя
     """
-    data = load_db()
-    user_id_str = str(user_id)
+    user = get_user(user_id)
     
-    if user_id_str not in data:
-        return None
+    # Проверка 1: Есть ли активная заявка
+    has_active, active_type = has_active_request(user_id)
+    if has_active:
+        return False, f"У вас уже есть активная заявка на {'⭐️ Звезды' if active_type == 'stars' else '🎁 Premium'}"
     
-    if data[user_id_str]["active_requests"]["stars"] is not None:
-        return "stars"
-    if data[user_id_str]["active_requests"]["premium"] is not None:
-        return "premium"
+    # Проверка 2: Был ли пользователь уже в боте и получал заявки
+    # Если в истории уже есть заявки со статусом accepted/completed - НЕ ДАЕМ СОЗДАВАТЬ НОВЫЕ
+    for req in user["requests_history"]:
+        if req["status"] in ["accepted", "completed"]:
+            return False, "Вы уже получали подарок. Каждый пользователь может получить только один подарок!"
     
-    return None
-
-def add_referral(inviter_username, new_user_id):
-    """
-    Добавляет реферала пригласившему
-    """
-    data = load_db()
-    new_user_id_str = str(new_user_id)
-    
-    inviter_id = None
-    for uid, uinfo in data.items():
-        if uinfo.get("username") == inviter_username:
-            inviter_id = uid
-            break
-    
-    if not inviter_id:
-        return False
-    
-    if new_user_id_str in data[inviter_id]["referrals"]["referred_users"]:
-        return False
-    
-    data[inviter_id]["referrals"]["count"] += 1
-    data[inviter_id]["referrals"]["referred_users"].append(new_user_id_str)
-    
-    if new_user_id_str in data:
-        data[new_user_id_str]["invited_by"] = inviter_id
-    
-    save_db(data)
-    return True
+    return True, None
 
 def add_active_request(user_id, request_type, request_data):
     """
     Добавляет активную заявку пользователю
-    ТОЛЬКО ОДНА ЗАЯВКА НА ПОЛЬЗОВАТЕЛЯ
+    request_type: 'stars' или 'premium'
+    request_data: словарь с данными заявки
     """
-    # Загружаем данные
-    data = load_db()
-    user_id_str = str(user_id)
+    user = get_user(user_id)
     
-    # Если пользователь уже есть в базе - проверяем его заявки
-    if user_id_str in data:
-        # Проверяем заявки на звезды
-        if data[user_id_str]["active_requests"]["stars"] is not None:
-            print(f"❌ У пользователя {user_id} уже есть заявка на звезды: {data[user_id_str]['active_requests']['stars']}")
-            return False
-        
-        # Проверяем заявки на premium
-        if data[user_id_str]["active_requests"]["premium"] is not None:
-            print(f"❌ У пользователя {user_id} уже есть заявка на premium: {data[user_id_str]['active_requests']['premium']}")
-            return False
-        
-        # Проверяем историю на случай зависших заявок
-        for req in data[user_id_str]["requests_history"]:
-            if req["status"] == "pending":
-                print(f"❌ Найдена pending заявка в истории: {req['id']}")
-                return False
-    
-    # Если пользователя нет в базе - создаем
-    else:
-        data[user_id_str] = {
-            "username": request_data.get("user_username"),
-            "first_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "referrals": {
-                "count": 0,
-                "referred_users": []
-            },
-            "invited_by": None,
-            "active_requests": {
-                "stars": None,
-                "premium": None
-            },
-            "requests_history": []
-        }
+    # Проверяем, можно ли создать заявку
+    can_create, reason = can_create_request(user_id)
+    if not can_create:
+        return False, reason
     
     # Генерируем ID заявки
     from utils import generate_request_id
@@ -192,45 +178,44 @@ def add_active_request(user_id, request_type, request_data):
         "id": request_id,
         "type": request_type,
         "user_id": user_id,
-        "status": "pending",
+        "status": "pending",  # pending, accepted, completed
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data": request_data
     }
     
-    # Сохраняем
-    data[user_id_str]["active_requests"][request_type] = request_id
-    data[user_id_str]["requests_history"].append(full_request)
+    # Сохраняем в историю
+    user_data = load_db()
+    user_id_str = str(user_id)
+    user_data[user_id_str]["active_requests"][request_type] = request_id
+    user_data[user_id_str]["requests_history"].append(full_request)
     
-    save_db(data)
-    print(f"✅ Заявка {request_id} создана для пользователя {user_id}")
-    return request_id
+    save_db(user_data)
+    return True, request_id
 
 def remove_active_request(user_id, request_type):
     """
-    Удаляет активную заявку
+    Удаляет активную заявку (после выдачи или отклонения)
     """
-    data = load_db()
+    user_data = load_db()
     user_id_str = str(user_id)
     
-    if user_id_str not in data:
-        return None
+    request_id = user_data[user_id_str]["active_requests"][request_type]
+    user_data[user_id_str]["active_requests"][request_type] = None
     
-    request_id = data[user_id_str]["active_requests"][request_type]
-    data[user_id_str]["active_requests"][request_type] = None
-    
-    for req in data[user_id_str]["requests_history"]:
+    # В истории можно отметить как завершенную
+    for req in user_data[user_id_str]["requests_history"]:
         if req["id"] == request_id:
             req["status"] = "completed"
             req["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             break
     
-    save_db(data)
-    print(f"✅ Заявка {request_id} удалена у пользователя {user_id}")
+    save_db(user_data)
     return request_id
 
 def get_request_by_id(request_id):
     """
-    Находит заявку по её ID
+    Находит заявку по её ID (ищет по всем пользователям)
+    Возвращает (user_id, request_data) или (None, None)
     """
     data = load_db()
     
@@ -240,3 +225,36 @@ def get_request_by_id(request_id):
                 return int(user_id_str), req
     
     return None, None
+
+def add_referral(inviter_username, new_user_id):
+    """
+    Добавляет реферала пригласившему
+    Возвращает True, если реферал уникальный и добавлен
+    """
+    data = load_db()
+    new_user_id_str = str(new_user_id)
+    
+    # Ищем пригласившего по username
+    inviter_id = None
+    for uid, uinfo in data.items():
+        if uinfo.get("username") == inviter_username:
+            inviter_id = uid
+            break
+    
+    if not inviter_id:
+        return False  # пригласивший не найден
+    
+    # Проверяем, не был ли этот пользователь уже рефералом
+    if new_user_id_str in data[inviter_id]["referrals"]["referred_users"]:
+        return False  # уже приглашал этого
+    
+    # Добавляем реферала
+    data[inviter_id]["referrals"]["count"] += 1
+    data[inviter_id]["referrals"]["referred_users"].append(new_user_id_str)
+    
+    # Записываем, кто пригласил нового пользователя
+    if new_user_id_str in data:
+        data[new_user_id_str]["invited_by"] = inviter_id
+    
+    save_db(data)
+    return True
