@@ -71,21 +71,28 @@ def update_user(user_id, updates):
 def has_active_request(user_id):
     """
     Проверяет, есть ли у пользователя активная заявка (любого типа)
-    Возвращает (True, тип) или (False, None)
+    ВОЗВРАЩАЕТ ТОЛЬКО True/False
     """
     user = get_user(user_id)
     
-    if user["active_requests"]["stars"]:
-        return True, "stars"
-    elif user["active_requests"]["premium"]:
-        return True, "premium"
-    else:
-        return False, None
+    # Проверяем оба типа
+    if user["active_requests"]["stars"] is not None:
+        return True
+    if user["active_requests"]["premium"] is not None:
+        return True
+    
+    return False
 
-def get_active_request_id(user_id, request_type):
-    """Возвращает ID активной заявки конкретного типа"""
+def get_active_request_type(user_id):
+    """Возвращает тип активной заявки или None"""
     user = get_user(user_id)
-    return user["active_requests"][request_type]
+    
+    if user["active_requests"]["stars"] is not None:
+        return "stars"
+    if user["active_requests"]["premium"] is not None:
+        return "premium"
+    
+    return None
 
 def add_referral(inviter_username, new_user_id):
     """Добавляет реферала пригласившему"""
@@ -119,17 +126,34 @@ def add_active_request(user_id, request_type, request_data):
     Добавляет активную заявку пользователю
     Возвращает ID заявки или False если уже есть
     """
+    user_data = load_db()
+    user_id_str = str(user_id)
+    
+    # === ТРОЙНАЯ ПРОВЕРКА ===
+    
+    # 1. Проверка через get_user
     user = get_user(user_id)
     
-    # Проверяем заявку этого же типа
+    # 2. Проверяем заявку этого же типа
     if user["active_requests"][request_type] is not None:
+        print(f"❌ Заявка типа {request_type} уже существует")
         return False
     
-    # Проверяем ЛЮБУЮ активную заявку
-    has_active, active_type = has_active_request(user_id)
-    if has_active:
+    # 3. Проверяем ЛЮБУЮ активную заявку
+    if user["active_requests"]["stars"] is not None or user["active_requests"]["premium"] is not None:
+        print(f"❌ У пользователя {user_id} уже есть активная заявка")
         return False
     
+    # 4. ФИНАЛЬНАЯ проверка - смотрим напрямую в данные
+    if user_id_str in user_data:
+        if user_data[user_id_str]["active_requests"]["stars"] is not None:
+            print(f"❌ Прямая проверка: есть заявка stars")
+            return False
+        if user_data[user_id_str]["active_requests"]["premium"] is not None:
+            print(f"❌ Прямая проверка: есть заявка premium")
+            return False
+    
+    # Если все проверки пройдены - создаем заявку
     from utils import generate_request_id
     request_id = generate_request_id(user_id, request_type)
     
@@ -142,12 +166,12 @@ def add_active_request(user_id, request_type, request_data):
         "data": request_data
     }
     
-    user_data = load_db()
-    user_id_str = str(user_id)
+    # Сохраняем
     user_data[user_id_str]["active_requests"][request_type] = request_id
     user_data[user_id_str]["requests_history"].append(full_request)
     
     save_db(user_data)
+    print(f"✅ Заявка {request_id} создана")
     return request_id
 
 def remove_active_request(user_id, request_type):
@@ -158,6 +182,7 @@ def remove_active_request(user_id, request_type):
     request_id = user_data[user_id_str]["active_requests"][request_type]
     user_data[user_id_str]["active_requests"][request_type] = None
     
+    # В истории отмечаем как завершенную
     for req in user_data[user_id_str]["requests_history"]:
         if req["id"] == request_id:
             req["status"] = "completed"
@@ -165,6 +190,7 @@ def remove_active_request(user_id, request_type):
             break
     
     save_db(user_data)
+    print(f"✅ Заявка {request_id} удалена")
     return request_id
 
 def get_request_by_id(request_id):
@@ -179,7 +205,7 @@ def get_request_by_id(request_id):
     return None, None
 
 def cleanup_old_requests(hours=12):
-    """Удаляет старые заявки (для будущего использования)"""
+    """Удаляет старые заявки"""
     data = load_db()
     now = datetime.now()
     cleaned = 0
