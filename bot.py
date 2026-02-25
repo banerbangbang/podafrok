@@ -1,7 +1,6 @@
 """
 Главный файл бота
-Запуск и обработка всех сообщений
-Автопринятие через 60 секунд + проверка при запуске
+Красивый интерфейс + защита от бесконечных заявок
 """
 
 import logging
@@ -17,7 +16,6 @@ from telegram.ext import (
     ContextTypes
 )
 
-# Наши модули
 from config import (
     BOT_TOKEN, ADMIN_ID, MAX_STARS, ABOUT_TEXT, START_TEXT,
     STARS_CONDITIONS, PREMIUM_CONDITIONS, PREMIUM_OPTIONS,
@@ -38,7 +36,8 @@ from database import (
     add_active_request,
     remove_active_request,
     get_request_by_id,
-    has_active_request
+    has_active_request,
+    get_active_request_type
 )
 from utils import (
     validate_datetime,
@@ -59,7 +58,6 @@ user_states = {}
 # ================== ПРОВЕРКА ПОДПИСКИ ==================
 
 async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Проверяет, подписан ли пользователь на обязательный канал"""
     try:
         member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
         if member.status in ['member', 'administrator', 'creator']:
@@ -70,7 +68,6 @@ async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE) -> boo
         return True
 
 async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Проверка подписки перед действием"""
     user_id = update.effective_user.id
     is_subscribed = await check_subscription(user_id, context)
     
@@ -86,9 +83,6 @@ async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TY
 # ================== ПРОВЕРКА АВТОПРИНЯТИЯ ==================
 
 async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Проверяет все активные заявки и принимает те, которым больше 60 секунд
-    """
     try:
         data = load_db()
         now = datetime.now()
@@ -97,7 +91,7 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
         for user_id_str, user_data in data.items():
             user_id = int(user_id_str)
             
-            # Проверяем заявки на звезды
+            # Проверяем звезды
             if user_data["active_requests"]["stars"]:
                 request_id = user_data["active_requests"]["stars"]
                 for req in user_data["requests_history"]:
@@ -128,7 +122,7 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
                             accepted += 1
                         break
             
-            # Проверяем заявки на premium
+            # Проверяем premium
             if user_data["active_requests"]["premium"]:
                 request_id = user_data["active_requests"]["premium"]
                 for req in user_data["requests_history"]:
@@ -161,7 +155,6 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
         
         if accepted > 0:
             save_db(data)
-            logger.info(f"✅ Автоматически принято заявок: {accepted}")
             
     except Exception as e:
         logger.error(f"Ошибка при проверке автопринятия: {e}")
@@ -170,9 +163,10 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
 
 async def check_active_request_and_notify(user_id, update: Update) -> bool:
     """Проверяет, есть ли у пользователя активная заявка"""
-    has_active, request_type = has_active_request(user_id)
+    has_active = has_active_request(user_id)
     
     if has_active:
+        request_type = get_active_request_type(user_id)
         type_display = "⭐️ Звезды" if request_type == "stars" else "🎁 Premium"
         
         await update.message.reply_text(
@@ -188,26 +182,20 @@ async def check_active_request_and_notify(user_id, update: Update) -> bool:
     
     return False
 
-# ================== ПРОВЕРКА ПРИ ЗАПУСКЕ ==================
-
 async def check_on_startup(app: Application):
-    """Проверяет заявки сразу после запуска бота"""
-    await asyncio.sleep(2)  # Даем боту полностью запуститься
+    await asyncio.sleep(2)
     logger.info("🔄 Проверка заявок при запуске...")
     await check_auto_accept(app)
 
 # ================== КОМАНДЫ ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     user = update.effective_user
     user_id = user.id
     username = user.username or f"user_{user_id}"
     
-    # Сначала проверяем заявки
     await check_auto_accept(context)
     
-    # Проверяем подписку
     if not await check_subscription(user_id, context):
         await update.message.reply_text(
             SUBSCRIPTION_REQUIRED_TEXT.format(channel=REQUIRED_CHANNEL),
@@ -215,14 +203,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Получаем или создаем пользователя в БД
     db_user = get_user(user_id)
     
-    # Обновляем username
     if db_user.get("username") != username:
         update_user(user_id, {"username": username})
     
-    # Проверяем реферальный параметр
     args = context.args
     if args and args[0].startswith('ref_'):
         inviter_username = extract_username_from_link(args[0])
@@ -234,17 +219,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Дождитесь выполнения его условий или подайте свою заявку!"
                 )
     
-    # Отправляем приветствие
     await update.message.reply_text(
         START_TEXT,
         reply_markup=get_main_keyboard()
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /status"""
     user_id = update.effective_user.id
     
-    # Сначала проверяем заявки
     await check_auto_accept(context)
     
     if not await subscription_required(update, context):
@@ -253,7 +235,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_user = get_user(user_id)
     referrals_count = db_user["referrals"]["count"]
     
-    has_active, request_type = has_active_request(user_id)
+    has_active = has_active_request(user_id)
+    request_type = get_active_request_type(user_id)
     
     if has_active:
         active_text = f"✅ Есть (тип: {'⭐️ Звезды' if request_type == 'stars' else '🎁 Premium'})"
@@ -275,7 +258,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode='HTML')
 
 async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для админа: /dell ID_заявки"""
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -317,10 +299,8 @@ async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================== ОБРАБОТЧИКИ СООБЩЕНИЙ ==================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает все текстовые сообщения"""
     user_id = update.effective_user.id
     
-    # Сначала проверяем заявки
     await check_auto_accept(context)
     
     if not await subscription_required(update, context):
@@ -361,7 +341,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================== ЗВЕЗДЫ: ШАГИ ==================
 
 async def start_stars_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 1: Начало заявки на Звезды"""
     user_id = update.effective_user.id
     
     if await check_active_request_and_notify(user_id, update):
@@ -375,7 +354,6 @@ async def start_stars_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def process_stars_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 2: Обработка количества звезд"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -399,7 +377,6 @@ async def process_stars_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def process_stars_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 3: Обработка username"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -416,7 +393,6 @@ async def process_stars_username(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 4: Обработка даты и времени + отправка админу"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -438,6 +414,15 @@ async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_T
     
     request_id = add_active_request(user_id, "stars", request_data)
     
+    if not request_id:
+        await update.message.reply_text(
+            "❌ Не удалось создать заявку! Возможно, у вас уже есть активная заявка.",
+            reply_markup=get_main_keyboard()
+        )
+        user_states.pop(user_id, None)
+        context.user_data.clear()
+        return
+    
     user_states.pop(user_id, None)
     context.user_data.clear()
     
@@ -447,7 +432,6 @@ async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=get_main_keyboard()
     )
     
-    # Отправляем админу
     admin_text = f"""
 🔔 НОВАЯ ЗАЯВКА (ЗВЕЗДЫ)
 От: @{request_data['user_username']}
@@ -469,7 +453,6 @@ ID заявки: {request_id}
 # ================== PREMIUM: ШАГИ ==================
 
 async def start_premium_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 1: Начало заявки на Premium"""
     user_id = update.effective_user.id
     
     if await check_active_request_and_notify(user_id, update):
@@ -481,14 +464,12 @@ async def start_premium_request(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора срока Premium"""
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
     
-    has_active, _ = has_active_request(user_id)
-    if has_active:
+    if has_active_request(user_id):
         await query.edit_message_text(
             "❌ У вас уже есть активная заявка!\n"
             "Дождитесь ее обработки."
@@ -516,7 +497,6 @@ async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT
     )
 
 async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 2: Обработка даты и времени для Premium"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -526,8 +506,7 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(result)
         return
     
-    has_active, _ = has_active_request(user_id)
-    if has_active:
+    if has_active_request(user_id):
         await update.message.reply_text(
             "❌ У вас уже есть активная заявка!\n"
             "Дождитесь ее обработки.",
@@ -549,6 +528,15 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
     
     request_id = add_active_request(user_id, "premium", request_data)
     
+    if not request_id:
+        await update.message.reply_text(
+            "❌ Не удалось создать заявку! Возможно, у вас уже есть активная заявка.",
+            reply_markup=get_main_keyboard()
+        )
+        user_states.pop(user_id, None)
+        context.user_data.clear()
+        return
+    
     user_states.pop(user_id, None)
     context.user_data.clear()
     
@@ -558,7 +546,6 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
         reply_markup=get_main_keyboard()
     )
     
-    # Отправляем админу
     admin_text = f"""
 🔔 НОВАЯ ЗАЯВКА (PREMIUM)
 От: @{request_data['user_username']}
@@ -579,32 +566,26 @@ ID заявки: {request_id}
 # ================== ОБРАБОТКА КНОПКИ "ПРИНЯТЬ" ==================
 
 async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатия на кнопку "Принять заявку" (для админа)"""
     query = update.callback_query
     await query.answer()
     
-    # Проверяем, что нажал админ
     if query.from_user.id != ADMIN_ID:
         await query.edit_message_text("⛔️ Эта кнопка только для администратора!")
         return
     
-    # Получаем ID заявки
     request_id = query.data.replace('accept_', '')
     logger.info(f"👆 Ручное принятие заявки {request_id}")
     
-    # Ищем заявку
     user_id, request_data = get_request_by_id(request_id)
     
     if not user_id:
         await query.edit_message_text("❌ Заявка не найдена!")
         return
     
-    # Получаем данные пользователя
     db_user = get_user(user_id)
     bot_username = context.bot.username
     referral_link = format_referral_link(bot_username, db_user["username"])
     
-    # Отправляем условия
     try:
         if request_data["type"] == "stars":
             conditions = STARS_CONDITIONS.format(referral_link=referral_link)
@@ -613,7 +594,6 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
         
         await context.bot.send_message(user_id, conditions, parse_mode='HTML')
         
-        # Обновляем статус в БД
         data = load_db()
         for req in data[str(user_id)]["requests_history"]:
             if req["id"] == request_id:
@@ -630,38 +610,26 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
 # ================== ЗАПУСК БОТА ==================
 
 def main():
-    """Главная функция запуска бота"""
-    # Инициализируем БД
     init_db()
     
-    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("dell", dell_command))
-    
-    # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    # Регистрируем обработчики инлайн-кнопок
     application.add_handler(CallbackQueryHandler(process_premium_callback, pattern="^premium_"))
     application.add_handler(CallbackQueryHandler(handle_accept_callback, pattern="^accept_"))
     
-    # Запускаем проверку автопринятия каждые 10 секунд
     application.job_queue.run_repeating(check_auto_accept, interval=10, first=5)
-    
-    # Запускаем проверку при старте (через 2 секунды)
-    import asyncio
     asyncio.get_event_loop().create_task(check_on_startup(application))
     
-    # Запускаем бота
     print("=" * 50)
-    print("Бот ЗАПУЩЕН!")
-    print(f"Обязательная подписка на {REQUIRED_CHANNEL}")
-    print("Условия: 2 реферала")
-    print("⏱ Автопринятие заявок через 60 секунд (проверка при запуске и каждые 10 сек)")
+    print("🔥 БОТ ЗАПУЩЕН!")
+    print(f"📢 Обязательная подписка на {REQUIRED_CHANNEL}")
+    print("👥 Условия: 2 реферала")
+    print("⏱ Автопринятие заявок через 60 секунд")
+    print("🔒 ТОЛЬКО ОДНА ЗАЯВКА НА ПОЛЬЗОВАТЕЛЯ!")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
