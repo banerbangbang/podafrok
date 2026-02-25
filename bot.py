@@ -1,10 +1,10 @@
 """
 Главный файл бота
-Красивый интерфейс + защита от бесконечных заявок
+Запуск и обработка всех сообщений
+Автопринятие через 60 секунд (надежная версия)
 """
 
 import logging
-import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import (
@@ -16,6 +16,7 @@ from telegram.ext import (
     ContextTypes
 )
 
+# Наши модули
 from config import (
     BOT_TOKEN, ADMIN_ID, MAX_STARS, ABOUT_TEXT, START_TEXT,
     STARS_CONDITIONS, PREMIUM_CONDITIONS, PREMIUM_OPTIONS,
@@ -37,7 +38,7 @@ from database import (
     remove_active_request,
     get_request_by_id,
     has_active_request,
-    get_active_request_type
+    can_create_request
 )
 from utils import (
     validate_datetime,
@@ -58,6 +59,7 @@ user_states = {}
 # ================== ПРОВЕРКА ПОДПИСКИ ==================
 
 async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Проверяет, подписан ли пользователь на обязательный канал"""
     try:
         member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
         if member.status in ['member', 'administrator', 'creator']:
@@ -68,6 +70,7 @@ async def check_subscription(user_id, context: ContextTypes.DEFAULT_TYPE) -> boo
         return True
 
 async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Проверка подписки перед действием"""
     user_id = update.effective_user.id
     is_subscribed = await check_subscription(user_id, context)
     
@@ -83,78 +86,122 @@ async def subscription_required(update: Update, context: ContextTypes.DEFAULT_TY
 # ================== ПРОВЕРКА АВТОПРИНЯТИЯ ==================
 
 async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Проверяет все активные заявки и принимает те, которым больше 60 секунд
+    Запускается каждые 10 секунд
+    """
     try:
         data = load_db()
         now = datetime.now()
         accepted = 0
+        to_remove = []  # Список заявок для удаления
         
         for user_id_str, user_data in data.items():
             user_id = int(user_id_str)
             
-            # Проверяем звезды
+            # Проверяем заявки на звезды
             if user_data["active_requests"]["stars"]:
                 request_id = user_data["active_requests"]["stars"]
+                found = False
+                
                 for req in user_data["requests_history"]:
-                    if req["id"] == request_id and req["status"] == "pending":
-                        created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
-                        delta = (now - created).total_seconds()
-                        
-                        if delta >= 60:
-                            logger.info(f"⚡ Автопринятие заявки {request_id}")
+                    if req["id"] == request_id:
+                        found = True
+                        if req["status"] == "pending":
+                            created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
+                            delta = (now - created).total_seconds()
                             
-                            db_user = get_user(user_id)
-                            referral_link = format_referral_link(context.bot.username, db_user["username"])
-                            
-                            if req["type"] == "stars":
-                                conditions = STARS_CONDITIONS.format(referral_link=referral_link)
-                            else:
-                                conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
-                            
-                            await context.bot.send_message(user_id, conditions, parse_mode='HTML')
-                            
-                            req["status"] = "accepted"
-                            user_data["active_requests"]["stars"] = None
-                            
-                            await context.bot.send_message(
-                                ADMIN_ID,
-                                f"✅ Заявка {request_id} автоматически принята через 60 секунд!"
-                            )
-                            accepted += 1
+                            if delta >= 60:
+                                logger.info(f"⚡ Автопринятие заявки {request_id}")
+                                
+                                # ПРОВЕРЯЕМ, ЧТО ПОЛЬЗОВАТЕЛЬ ЕЩЕ СУЩЕСТВУЕТ
+                                try:
+                                    await context.bot.get_chat(user_id)
+                                    
+                                    db_user = get_user(user_id)
+                                    referral_link = format_referral_link(context.bot.username, db_user["username"])
+                                    
+                                    if req["type"] == "stars":
+                                        conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+                                    else:
+                                        conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+                                    
+                                    await context.bot.send_message(user_id, conditions, parse_mode='HTML')
+                                    
+                                    req["status"] = "accepted"
+                                    user_data["active_requests"]["stars"] = None
+                                    
+                                    await context.bot.send_message(
+                                        ADMIN_ID,
+                                        f"✅ Заявка {request_id} автоматически принята через 60 секунд!"
+                                    )
+                                    accepted += 1
+                                except Exception as e:
+                                    # Пользователь заблокировал бота или удалил аккаунт
+                                    logger.warning(f"Пользователь {user_id} недоступен, удаляем заявку {request_id}")
+                                    to_remove.append((user_id_str, "stars", request_id))
                         break
+                
+                if not found:
+                    # Заявка есть в active_requests, но нет в истории - очищаем
+                    to_remove.append((user_id_str, "stars", request_id))
             
-            # Проверяем premium
+            # Проверяем заявки на premium
             if user_data["active_requests"]["premium"]:
                 request_id = user_data["active_requests"]["premium"]
+                found = False
+                
                 for req in user_data["requests_history"]:
-                    if req["id"] == request_id and req["status"] == "pending":
-                        created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
-                        delta = (now - created).total_seconds()
-                        
-                        if delta >= 60:
-                            logger.info(f"⚡ Автопринятие заявки {request_id}")
+                    if req["id"] == request_id:
+                        found = True
+                        if req["status"] == "pending":
+                            created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
+                            delta = (now - created).total_seconds()
                             
-                            db_user = get_user(user_id)
-                            referral_link = format_referral_link(context.bot.username, db_user["username"])
-                            
-                            if req["type"] == "stars":
-                                conditions = STARS_CONDITIONS.format(referral_link=referral_link)
-                            else:
-                                conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
-                            
-                            await context.bot.send_message(user_id, conditions, parse_mode='HTML')
-                            
-                            req["status"] = "accepted"
-                            user_data["active_requests"]["premium"] = None
-                            
-                            await context.bot.send_message(
-                                ADMIN_ID,
-                                f"✅ Заявка {request_id} автоматически принята через 60 секунд!"
-                            )
-                            accepted += 1
+                            if delta >= 60:
+                                logger.info(f"⚡ Автопринятие заявки {request_id}")
+                                
+                                # ПРОВЕРЯЕМ, ЧТО ПОЛЬЗОВАТЕЛЬ ЕЩЕ СУЩЕСТВУЕТ
+                                try:
+                                    await context.bot.get_chat(user_id)
+                                    
+                                    db_user = get_user(user_id)
+                                    referral_link = format_referral_link(context.bot.username, db_user["username"])
+                                    
+                                    if req["type"] == "stars":
+                                        conditions = STARS_CONDITIONS.format(referral_link=referral_link)
+                                    else:
+                                        conditions = PREMIUM_CONDITIONS.format(referral_link=referral_link)
+                                    
+                                    await context.bot.send_message(user_id, conditions, parse_mode='HTML')
+                                    
+                                    req["status"] = "accepted"
+                                    user_data["active_requests"]["premium"] = None
+                                    
+                                    await context.bot.send_message(
+                                        ADMIN_ID,
+                                        f"✅ Заявка {request_id} автоматически принята через 60 секунд!"
+                                    )
+                                    accepted += 1
+                                except Exception as e:
+                                    # Пользователь заблокировал бота или удалил аккаунт
+                                    logger.warning(f"Пользователь {user_id} недоступен, удаляем заявку {request_id}")
+                                    to_remove.append((user_id_str, "premium", request_id))
                         break
+                
+                if not found:
+                    # Заявка есть в active_requests, но нет в истории - очищаем
+                    to_remove.append((user_id_str, "premium", request_id))
         
-        if accepted > 0:
+        # Удаляем проблемные заявки
+        for user_id_str, req_type, req_id in to_remove:
+            if user_id_str in data:
+                data[user_id_str]["active_requests"][req_type] = None
+                logger.info(f"🗑 Удалена битая заявка {req_id}")
+        
+        if accepted > 0 or to_remove:
             save_db(data)
+            logger.info(f"✅ Автоматически принято: {accepted}, удалено битых: {len(to_remove)}")
             
     except Exception as e:
         logger.error(f"Ошибка при проверке автопринятия: {e}")
@@ -163,53 +210,33 @@ async def check_auto_accept(context: ContextTypes.DEFAULT_TYPE):
 
 async def check_active_request_and_notify(user_id, update: Update) -> bool:
     """Проверяет, есть ли у пользователя активная заявка"""
-    # Загружаем данные напрямую из БД для надежности
-    data = load_db()
-    user_id_str = str(user_id)
+    has_active, request_type = has_active_request(user_id)
     
-    if user_id_str in data:
-        if data[user_id_str]["active_requests"]["stars"] is not None:
-            type_display = "⭐️ Звезды"
-            await update.message.reply_text(
-                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-                f"У вас уже есть активная заявка на {type_display}!\n"
-                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
-                f"Дождитесь обработки текущей заявки.\n\n"
-                f"Используйте /status чтобы проверить статус.",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-            return True
+    if has_active:
+        type_display = "⭐️ Звезды" if request_type == "stars" else "🎁 Premium"
         
-        if data[user_id_str]["active_requests"]["premium"] is not None:
-            type_display = "🎁 Premium"
-            await update.message.reply_text(
-                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-                f"У вас уже есть активная заявка на {type_display}!\n"
-                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
-                f"Дождитесь обработки текущей заявки.\n\n"
-                f"Используйте /status чтобы проверить статус.",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-            return True
+        await update.message.reply_text(
+            f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+            f"У вас уже есть активная заявка на {type_display}!\n"
+            f"Можно выбрать только <b>ОДИН</b> подарок.\n"
+            f"Дождитесь обработки текущей заявки.\n\n"
+            f"Используйте /status чтобы проверить статус.",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        return True
     
     return False
-
-async def check_on_startup(app: Application):
-    await asyncio.sleep(2)
-    logger.info("🔄 Проверка заявок при запуске...")
-    await check_auto_accept(app)
 
 # ================== КОМАНДЫ ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
     user = update.effective_user
     user_id = user.id
     username = user.username or f"user_{user_id}"
     
-    await check_auto_accept(context)
-    
+    # Проверяем подписку
     if not await check_subscription(user_id, context):
         await update.message.reply_text(
             SUBSCRIPTION_REQUIRED_TEXT.format(channel=REQUIRED_CHANNEL),
@@ -217,11 +244,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Получаем или создаем пользователя в БД
     db_user = get_user(user_id)
     
+    # Обновляем username
     if db_user.get("username") != username:
         update_user(user_id, {"username": username})
     
+    # Проверяем реферальный параметр
     args = context.args
     if args and args[0].startswith('ref_'):
         inviter_username = extract_username_from_link(args[0])
@@ -233,15 +263,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Дождитесь выполнения его условий или подайте свою заявку!"
                 )
     
+    # Отправляем приветствие
     await update.message.reply_text(
         START_TEXT,
         reply_markup=get_main_keyboard()
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /status"""
     user_id = update.effective_user.id
-    
-    await check_auto_accept(context)
     
     if not await subscription_required(update, context):
         return
@@ -249,29 +279,27 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_user = get_user(user_id)
     referrals_count = db_user["referrals"]["count"]
     
-    # Прямая проверка из БД
-    data = load_db()
-    user_id_str = str(user_id)
-    has_active = False
-    request_type = None
-    
-    if user_id_str in data:
-        if data[user_id_str]["active_requests"]["stars"]:
-            has_active = True
-            request_type = "stars"
-        elif data[user_id_str]["active_requests"]["premium"]:
-            has_active = True
-            request_type = "premium"
+    has_active, request_type = has_active_request(user_id)
     
     if has_active:
         active_text = f"✅ Есть (тип: {'⭐️ Звезды' if request_type == 'stars' else '🎁 Premium'})"
     else:
         active_text = "❌ Нет активных заявок"
     
+    # Проверяем, получал ли пользователь уже подарок
+    has_gift = False
+    for req in db_user["requests_history"]:
+        if req["status"] in ["accepted", "completed"]:
+            has_gift = True
+            break
+    
+    gift_text = "✅ Получал" if has_gift else "❌ Не получал"
+    
     status_text = f"""
 📊 <b>Ваш статус</b>
 
 👥 Приглашено друзей: {referrals_count} из 2
+🎁 Подарок: {gift_text}
 
 <b>Активная заявка:</b>
 {active_text}
@@ -283,6 +311,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode='HTML')
 
 async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для админа: /dell ID_заявки"""
     user_id = update.effective_user.id
     
     if user_id != ADMIN_ID:
@@ -324,9 +353,8 @@ async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================== ОБРАБОТЧИКИ СООБЩЕНИЙ ==================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает все текстовые сообщения"""
     user_id = update.effective_user.id
-    
-    await check_auto_accept(context)
     
     if not await subscription_required(update, context):
         return
@@ -369,34 +397,15 @@ async def start_stars_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Шаг 1: Начало заявки на Звезды"""
     user_id = update.effective_user.id
     
-    # ПРЯМАЯ ПРОВЕРКА ИЗ БД
-    data = load_db()
-    user_id_str = str(user_id)
-    
-    if user_id_str in data:
-        if data[user_id_str]["active_requests"]["stars"] is not None:
-            await update.message.reply_text(
-                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-                f"У вас уже есть активная заявка на ⭐️ Звезды!\n"
-                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
-                f"Дождитесь обработки текущей заявки.\n\n"
-                f"Используйте /status чтобы проверить статус.",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-            return
-        
-        if data[user_id_str]["active_requests"]["premium"] is not None:
-            await update.message.reply_text(
-                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-                f"У вас уже есть активная заявка на 🎁 Premium!\n"
-                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
-                f"Дождитесь обработки текущей заявки.\n\n"
-                f"Используйте /status чтобы проверить статус.",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-            return
+    # Проверяем, может ли пользователь создать заявку
+    can_create, reason = can_create_request(user_id)
+    if not can_create:
+        await update.message.reply_text(
+            f"⚠️ {reason}\n\n"
+            f"Каждый пользователь может получить только ОДИН подарок!",
+            reply_markup=get_main_keyboard()
+        )
+        return
     
     user_states[user_id] = {"action": "waiting_stars_amount"}
     
@@ -406,6 +415,7 @@ async def start_stars_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def process_stars_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: Обработка количества звезд"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -429,6 +439,7 @@ async def process_stars_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def process_stars_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 3: Обработка username"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -445,6 +456,7 @@ async def process_stars_username(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 4: Обработка даты и времени + отправка админу"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -464,39 +476,19 @@ async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_T
         "user_username": update.effective_user.username or f"id{user_id}"
     }
     
-    # Последняя проверка перед созданием
-    data = load_db()
-    user_id_str = str(user_id)
+    # Пытаемся создать заявку
+    success, request_result = add_active_request(user_id, "stars", request_data)
     
-    if user_id_str in data:
-        if data[user_id_str]["active_requests"]["stars"] is not None:
-            await update.message.reply_text(
-                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
-                reply_markup=get_main_keyboard()
-            )
-            user_states.pop(user_id, None)
-            context.user_data.clear()
-            return
-        
-        if data[user_id_str]["active_requests"]["premium"] is not None:
-            await update.message.reply_text(
-                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
-                reply_markup=get_main_keyboard()
-            )
-            user_states.pop(user_id, None)
-            context.user_data.clear()
-            return
-    
-    request_id = add_active_request(user_id, "stars", request_data)
-    
-    if not request_id:
+    if not success:
         await update.message.reply_text(
-            "❌ Не удалось создать заявку! Возможно, у вас уже есть активная заявка.",
+            f"❌ {request_result}",
             reply_markup=get_main_keyboard()
         )
         user_states.pop(user_id, None)
         context.user_data.clear()
         return
+    
+    request_id = request_result
     
     user_states.pop(user_id, None)
     context.user_data.clear()
@@ -507,6 +499,7 @@ async def process_stars_datetime(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=get_main_keyboard()
     )
     
+    # Отправляем админу
     admin_text = f"""
 🔔 НОВАЯ ЗАЯВКА (ЗВЕЗДЫ)
 От: @{request_data['user_username']}
@@ -531,34 +524,15 @@ async def start_premium_request(update: Update, context: ContextTypes.DEFAULT_TY
     """Шаг 1: Начало заявки на Premium"""
     user_id = update.effective_user.id
     
-    # ПРЯМАЯ ПРОВЕРКА ИЗ БД
-    data = load_db()
-    user_id_str = str(user_id)
-    
-    if user_id_str in data:
-        if data[user_id_str]["active_requests"]["stars"] is not None:
-            await update.message.reply_text(
-                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-                f"У вас уже есть активная заявка на ⭐️ Звезды!\n"
-                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
-                f"Дождитесь обработки текущей заявки.\n\n"
-                f"Используйте /status чтобы проверить статус.",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-            return
-        
-        if data[user_id_str]["active_requests"]["premium"] is not None:
-            await update.message.reply_text(
-                f"⚠️ <b>ВНИМАНИЕ!</b>\n\n"
-                f"У вас уже есть активная заявка на 🎁 Premium!\n"
-                f"Можно выбрать только <b>ОДИН</b> подарок.\n"
-                f"Дождитесь обработки текущей заявки.\n\n"
-                f"Используйте /status чтобы проверить статус.",
-                parse_mode='HTML',
-                reply_markup=get_main_keyboard()
-            )
-            return
+    # Проверяем, может ли пользователь создать заявку
+    can_create, reason = can_create_request(user_id)
+    if not can_create:
+        await update.message.reply_text(
+            f"⚠️ {reason}\n\n"
+            f"Каждый пользователь может получить только ОДИН подарок!",
+            reply_markup=get_main_keyboard()
+        )
+        return
     
     await update.message.reply_text(
         "На сколько месяцев хотите получить Premium?",
@@ -566,29 +540,19 @@ async def start_premium_request(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора срока Premium"""
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
     
-    # Проверка перед выбором срока
-    data = load_db()
-    user_id_str = str(user_id)
-    
-    if user_id_str in data:
-        if data[user_id_str]["active_requests"]["stars"] is not None:
-            await query.edit_message_text(
-                "❌ У вас уже есть активная заявка на Звезды!\n"
-                "Дождитесь ее обработки."
-            )
-            return
-        
-        if data[user_id_str]["active_requests"]["premium"] is not None:
-            await query.edit_message_text(
-                "❌ У вас уже есть активная заявка на Premium!\n"
-                "Дождитесь ее обработки."
-            )
-            return
+    # Проверяем, может ли пользователь создать заявку
+    can_create, reason = can_create_request(user_id)
+    if not can_create:
+        await query.edit_message_text(
+            f"⚠️ {reason}"
+        )
+        return
     
     months = int(query.data.split('_')[1])
     
@@ -611,6 +575,7 @@ async def process_premium_callback(update: Update, context: ContextTypes.DEFAULT
     )
 
 async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: Обработка даты и времени для Premium"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
@@ -619,29 +584,6 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
     if not is_valid:
         await update.message.reply_text(result)
         return
-    
-    # Последняя проверка перед созданием
-    data = load_db()
-    user_id_str = str(user_id)
-    
-    if user_id_str in data:
-        if data[user_id_str]["active_requests"]["stars"] is not None:
-            await update.message.reply_text(
-                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
-                reply_markup=get_main_keyboard()
-            )
-            user_states.pop(user_id, None)
-            context.user_data.clear()
-            return
-        
-        if data[user_id_str]["active_requests"]["premium"] is not None:
-            await update.message.reply_text(
-                "❌ Не удалось создать заявку! У вас уже есть активная заявка.",
-                reply_markup=get_main_keyboard()
-            )
-            user_states.pop(user_id, None)
-            context.user_data.clear()
-            return
     
     months = context.user_data.get('premium_duration')
     duration_name = context.user_data.get('premium_duration_name')
@@ -653,16 +595,19 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
         "user_username": update.effective_user.username or f"id{user_id}"
     }
     
-    request_id = add_active_request(user_id, "premium", request_data)
+    # Пытаемся создать заявку
+    success, request_result = add_active_request(user_id, "premium", request_data)
     
-    if not request_id:
+    if not success:
         await update.message.reply_text(
-            "❌ Не удалось создать заявку! Возможно, у вас уже есть активная заявка.",
+            f"❌ {request_result}",
             reply_markup=get_main_keyboard()
         )
         user_states.pop(user_id, None)
         context.user_data.clear()
         return
+    
+    request_id = request_result
     
     user_states.pop(user_id, None)
     context.user_data.clear()
@@ -673,6 +618,7 @@ async def process_premium_datetime(update: Update, context: ContextTypes.DEFAULT
         reply_markup=get_main_keyboard()
     )
     
+    # Отправляем админу
     admin_text = f"""
 🔔 НОВАЯ ЗАЯВКА (PREMIUM)
 От: @{request_data['user_username']}
@@ -693,26 +639,46 @@ ID заявки: {request_id}
 # ================== ОБРАБОТКА КНОПКИ "ПРИНЯТЬ" ==================
 
 async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатия на кнопку "Принять заявку" (для админа)"""
     query = update.callback_query
     await query.answer()
     
+    # Проверяем, что нажал админ
     if query.from_user.id != ADMIN_ID:
         await query.edit_message_text("⛔️ Эта кнопка только для администратора!")
         return
     
+    # Получаем ID заявки
     request_id = query.data.replace('accept_', '')
     logger.info(f"👆 Ручное принятие заявки {request_id}")
     
+    # Ищем заявку
     user_id, request_data = get_request_by_id(request_id)
     
     if not user_id:
         await query.edit_message_text("❌ Заявка не найдена!")
         return
     
+    # Проверяем, существует ли пользователь
+    try:
+        await context.bot.get_chat(user_id)
+    except Exception as e:
+        await query.edit_message_text(f"❌ Пользователь не найден или заблокировал бота! Заявка будет удалена.")
+        # Удаляем заявку
+        remove_active_request(user_id, request_data["type"])
+        return
+    
+    # Проверяем, что заявка еще в статусе pending
+    if request_data["status"] != "pending":
+        await query.edit_message_text(f"❌ Заявка уже {request_data['status']}!")
+        return
+    
+    # Получаем данные пользователя
     db_user = get_user(user_id)
     bot_username = context.bot.username
     referral_link = format_referral_link(bot_username, db_user["username"])
     
+    # Отправляем условия
     try:
         if request_data["type"] == "stars":
             conditions = STARS_CONDITIONS.format(referral_link=referral_link)
@@ -721,6 +687,7 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
         
         await context.bot.send_message(user_id, conditions, parse_mode='HTML')
         
+        # Обновляем статус в БД
         data = load_db()
         for req in data[str(user_id)]["requests_history"]:
             if req["id"] == request_id:
@@ -737,26 +704,34 @@ async def handle_accept_callback(update: Update, context: ContextTypes.DEFAULT_T
 # ================== ЗАПУСК БОТА ==================
 
 def main():
+    """Главная функция запуска бота"""
+    # Инициализируем БД
     init_db()
     
+    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("dell", dell_command))
+    
+    # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Регистрируем обработчики инлайн-кнопок
     application.add_handler(CallbackQueryHandler(process_premium_callback, pattern="^premium_"))
     application.add_handler(CallbackQueryHandler(handle_accept_callback, pattern="^accept_"))
     
+    # Запускаем проверку автопринятия каждые 10 секунд
     application.job_queue.run_repeating(check_auto_accept, interval=10, first=5)
-    asyncio.get_event_loop().create_task(check_on_startup(application))
     
+    # Запускаем бота
     print("=" * 50)
-    print("🔥 БОТ ЗАПУЩЕН!")
-    print(f"📢 Обязательная подписка на {REQUIRED_CHANNEL}")
-    print("👥 Условия: 2 реферала")
-    print("⏱ Автопринятие заявок через 60 секунд")
-    print("🔒 ТОЛЬКО ОДНА ЗАЯВКА НА ПОЛЬЗОВАТЕЛЯ!")
+    print("Бот ЗАПУЩЕН!")
+    print(f"Обязательная подписка на {REQUIRED_CHANNEL}")
+    print("Условия: 2 реферала")
+    print("⏱ Автопринятие заявок через 60 секунд (проверка каждые 10 сек)")
     print("=" * 50)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
