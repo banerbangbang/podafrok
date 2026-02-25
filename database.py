@@ -133,11 +133,28 @@ def add_active_request(user_id, request_type, request_data):
     request_type: 'stars' или 'premium'
     request_data: словарь с данными заявки
     """
-    user = get_user(user_id)
+    # Загружаем данные напрямую (самая надежная проверка)
+    user_data = load_db()
+    user_id_str = str(user_id)
     
-    # Проверяем, есть ли уже активная заявка (ЛЮБОГО типа)
-    has_active, _ = has_active_request(user_id)
-    if has_active:
+    # Проверяем, есть ли пользователь в базе
+    if user_id_str not in user_data:
+        user_data[user_id_str] = {
+            "username": None,
+            "first_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "referrals": {"count": 0, "referred_users": []},
+            "invited_by": None,
+            "active_requests": {"stars": None, "premium": None},
+            "requests_history": []
+        }
+    
+    # ЖЕСТКАЯ ПРОВЕРКА: смотрим оба типа заявок
+    if user_data[user_id_str]["active_requests"]["stars"] is not None:
+        print(f"❌ Уже есть активная заявка на звезды: {user_data[user_id_str]['active_requests']['stars']}")
+        return False
+    
+    if user_data[user_id_str]["active_requests"]["premium"] is not None:
+        print(f"❌ Уже есть активная заявка на premium: {user_data[user_id_str]['active_requests']['premium']}")
         return False
     
     # Генерируем ID заявки
@@ -154,13 +171,12 @@ def add_active_request(user_id, request_type, request_data):
         "data": request_data
     }
     
-    # Сохраняем в историю
-    user_data = load_db()
-    user_id_str = str(user_id)
+    # Сохраняем
     user_data[user_id_str]["active_requests"][request_type] = request_id
     user_data[user_id_str]["requests_history"].append(full_request)
     
     save_db(user_data)
+    print(f"✅ Заявка {request_id} создана")
     return request_id
 
 def remove_active_request(user_id, request_type):
@@ -181,6 +197,7 @@ def remove_active_request(user_id, request_type):
             break
     
     save_db(user_data)
+    print(f"✅ Заявка {request_id} удалена")
     return request_id
 
 def get_request_by_id(request_id):
