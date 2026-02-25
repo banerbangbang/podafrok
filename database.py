@@ -7,6 +7,7 @@ import json
 import os
 from datetime import datetime
 
+# Имя файла с данными
 DB_FILE = "user.json"
 
 def init_db():
@@ -26,11 +27,12 @@ def save_db(data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 def get_user(user_id):
-    """Получает данные пользователя"""
+    """Получает данные конкретного пользователя"""
     data = load_db()
     user_id_str = str(user_id)
     
     if user_id_str not in data:
+        # Новый пользователь
         data[user_id_str] = {
             "username": None,
             "first_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -67,7 +69,10 @@ def update_user(user_id, updates):
     return data[user_id_str]
 
 def has_active_request(user_id):
-    """Проверяет, есть ли у пользователя активная заявка"""
+    """
+    Проверяет, есть ли у пользователя активная заявка (любого типа)
+    Возвращает (True, тип) или (False, None)
+    """
     user = get_user(user_id)
     
     if user["active_requests"]["stars"]:
@@ -77,11 +82,17 @@ def has_active_request(user_id):
     else:
         return False, None
 
+def get_active_request_id(user_id, request_type):
+    """Возвращает ID активной заявки конкретного типа"""
+    user = get_user(user_id)
+    return user["active_requests"][request_type]
+
 def add_referral(inviter_username, new_user_id):
-    """Добавляет реферала"""
+    """Добавляет реферала пригласившему"""
     data = load_db()
     new_user_id_str = str(new_user_id)
     
+    # Ищем пригласившего по username
     inviter_id = None
     for uid, uinfo in data.items():
         if uinfo.get("username") == inviter_username:
@@ -104,11 +115,19 @@ def add_referral(inviter_username, new_user_id):
     return True
 
 def add_active_request(user_id, request_type, request_data):
-    """Добавляет активную заявку пользователю"""
+    """
+    Добавляет активную заявку пользователю
+    Возвращает ID заявки или False если уже есть
+    """
     user = get_user(user_id)
     
-    # Проверяем только заявку этого же типа
+    # Проверяем заявку этого же типа
     if user["active_requests"][request_type] is not None:
+        return False
+    
+    # Проверяем ЛЮБУЮ активную заявку
+    has_active, active_type = has_active_request(user_id)
+    if has_active:
         return False
     
     from utils import generate_request_id
@@ -149,7 +168,7 @@ def remove_active_request(user_id, request_type):
     return request_id
 
 def get_request_by_id(request_id):
-    """Находит заявку по ID"""
+    """Находит заявку по её ID"""
     data = load_db()
     
     for user_id_str, user_info in data.items():
@@ -158,3 +177,25 @@ def get_request_by_id(request_id):
                 return int(user_id_str), req
     
     return None, None
+
+def cleanup_old_requests(hours=12):
+    """Удаляет старые заявки (для будущего использования)"""
+    data = load_db()
+    now = datetime.now()
+    cleaned = 0
+    
+    for user_id_str, user_info in data.items():
+        for req in user_info["requests_history"]:
+            if req["status"] == "pending":
+                created = datetime.strptime(req["created_at"], "%Y-%m-%d %H:%M:%S")
+                delta = (now - created).total_seconds()
+                if delta > hours * 3600:
+                    req["status"] = "expired"
+                    if req["id"] == user_info["active_requests"][req["type"]]:
+                        user_info["active_requests"][req["type"]] = None
+                    cleaned += 1
+    
+    if cleaned > 0:
+        save_db(data)
+    
+    return cleaned
