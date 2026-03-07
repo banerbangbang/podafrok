@@ -352,54 +352,44 @@ async def dell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== ОБРАБОТЧИКИ СООБЩЕНИЙ ==================
 
-async def handle_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопки Звезды"""
-    if not await subscription_required(update, context):
-        return
-    await start_stars_request(update, context)
-
-async def handle_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопки TG Premium"""
-    if not await subscription_required(update, context):
-        return
-    await start_premium_request(update, context)
-
-async def handle_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик кнопки О боте"""
-    if not await subscription_required(update, context):
-        return
-    await update.message.reply_text(ABOUT_TEXT, parse_mode='HTML')
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает все текстовые сообщения (для состояний)"""
+    """Обрабатывает все текстовые сообщения"""
     user_id = update.effective_user.id
     
     if not await subscription_required(update, context):
         return
     
-    if user_id in user_states:
-        state = user_states[user_id]
-        
-        if state["action"] == "waiting_stars_amount":
-            await process_stars_amount(update, context)
-        elif state["action"] == "waiting_stars_username":
-            await process_stars_username(update, context)
-        elif state["action"] == "waiting_stars_datetime":
-            await process_stars_datetime(update, context)
-        elif state["action"] == "waiting_premium_datetime":
-            await process_premium_datetime(update, context)
+    text = update.message.text
+    
+    if text == "Звезды 🎁":
+        await start_stars_request(update, context)
+    elif text == "TG Premium ⭐️":
+        await start_premium_request(update, context)
+    elif text == "О боте ℹ️":
+        await update.message.reply_text(ABOUT_TEXT, parse_mode='HTML')
+    else:
+        if user_id in user_states:
+            state = user_states[user_id]
+            
+            if state["action"] == "waiting_stars_amount":
+                await process_stars_amount(update, context)
+            elif state["action"] == "waiting_stars_username":
+                await process_stars_username(update, context)
+            elif state["action"] == "waiting_stars_datetime":
+                await process_stars_datetime(update, context)
+            elif state["action"] == "waiting_premium_datetime":
+                await process_premium_datetime(update, context)
+            else:
+                user_states.pop(user_id, None)
+                await update.message.reply_text(
+                    "Используйте кнопки меню 👆",
+                    reply_markup=get_main_keyboard()
+                )
         else:
-            user_states.pop(user_id, None)
             await update.message.reply_text(
                 "Используйте кнопки меню 👆",
                 reply_markup=get_main_keyboard()
             )
-    else:
-        # Если нет состояния, но пользователь что-то написал
-        await update.message.reply_text(
-            "Используйте кнопки меню 👆",
-            reply_markup=get_main_keyboard()
-        )
 
 # ================== ЗВЕЗДЫ: ШАГИ ==================
 
@@ -726,21 +716,7 @@ def main():
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("dell", dell_command))
     
-    # Регистрируем обработчики для кнопок меню (с разными вариантами текста)
-    application.add_handler(MessageHandler(
-        filters.Text(["Звезды 🎁", "Звезды"]), 
-        handle_stars
-    ))
-    application.add_handler(MessageHandler(
-        filters.Text(["TG Premium ⭐️", "TG Premium"]), 
-        handle_premium
-    ))
-    application.add_handler(MessageHandler(
-        filters.Text(["О боте ℹ️", "О боте"]), 
-        handle_about
-    ))
-    
-    # Регистрируем обработчик для всех остальных текстовых сообщений (состояния)
+    # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Регистрируем обработчики инлайн-кнопок
